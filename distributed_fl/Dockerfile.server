@@ -1,0 +1,33 @@
+# Use a Python image with uv pre-installed
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+# Set the working directory
+WORKDIR /app
+
+# Enable bytecode compilation and set linking mode
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+
+# Install project dependencies using uv.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-install-project --no-dev
+
+# Add the rest of the project source code.
+ADD . /app
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
+
+# Make the virtual environment's executables available in PATH
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Reset the entrypoint so that uv does not auto-run any command.
+ENTRYPOINT []
+
+# Expose a 9000-level port for the server. Adjust if your server listens on a different port.
+EXPOSE 9000
+
+# Run the server. (Assumes your server code is in server/server.py.)
+CMD ["python", "server/server.py"]

@@ -1,0 +1,56 @@
+[project]
+name = "distributed-fl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiokafka>=0.12.0",
+    "flwr>=1.17.0",
+    "flwr-datasets>=0.5.0",
+    "grpcio>=1.71.0",
+    "grpcio-tools>=1.62.3",
+    "peft>=0.15.2",
+    "torch>=2.6.0",
+    "transformers>=4.51.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.flwr.app]
+publisher = "tlebryk"
+
+[tool.flwr.app.components]
+serverapp = "distributed_fl.server_app:app"
+clientapp = "distributed_fl.client_app:app"
+
+[tool.flwr.app.config]
+num-server-rounds = 3
+fraction-fit = 0.5
+local-epochs = 1
+model-name = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
+num-labels = 2
+buffer-size = 5              # Number of client updates to buffer before aggregation
+max-wait-time = 120.0        # Maximum time to wait before aggregating (seconds)
+staleness-factor = 0.9       # Factor to decay weight of stale updates
+buffer-timeout = 600.0       # Maximum time an update can stay in buffer (seconds)
+
+[tool.flwr.federations]
+default = "localhost"
+
+[tool.flwr.federations.localhost]
+options.num-supernodes = 3
+
+[tool.flwr.federations.localhost-gpu]
+options.num-supernodes = 3
+options.backend.client-resources.num-cpus = 4 # each ClientApp assumes to use 4CPUs
+options.backend.client-resources.num-gpus = 0.25 # at most 4 ClientApps will run in a given GPU
+
+[dependency-groups]
+dev = [
+    "flwr[simulation]>=1.17.0",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+    "pytest-env>=1.1.5",
+]
