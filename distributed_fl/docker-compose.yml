@@ -1,45 +1,55 @@
-version: "3.8"
+version: '3.8'
 
 services:
-  zookeeper:
-    image: bitnami/zookeeper:latest
-    environment:
-      - ALLOW_ANONYMOUS_LOGIN=yes
-    ports:
-      - "2181:2181"
-
-  kafka:
-    image: bitnami/kafka:latest
-    environment:
-      - KAFKA_BROKER_ID=1
-      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
-      - KAFKA_LISTENERS=PLAINTEXT://:9092
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
-      - ALLOW_PLAINTEXT_LISTENER=yes
-      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
-    ports:
-      - "9092:9092"
-    depends_on:
-      - zookeeper
-
-  server:
+  fl-server:
     build:
       context: .
       dockerfile: Dockerfile.server
-    command: ["python", "server/server.py", "--bootstrap_servers", "kafka:9092"]
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
     ports:
-      - "9000:9000"
-    depends_on:
-      - kafka
+      - "50051:50051"  # Expose the gRPC port (the code uses 50051, not 9000)
+    volumes:
+      - ./model_update_pb2.py:/app/model_update_pb2.py
+      - ./model_update_pb2_grpc.py:/app/model_update_pb2_grpc.py
+      - ./server.py:/app/server.py
+    command: ["python", "server.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.socket().connect(('localhost', 50051))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  client:
+  fl-client-1:
     build:
       context: .
       dockerfile: Dockerfile.client
-    command: ["python", "client/client.py", "--bootstrap_servers", "kafka:9092", "--client_id", "client1"]
-    environment:
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
     depends_on:
-      - kafka
+      fl-server:
+        condition: service_healthy
+    volumes:
+      - ./model_update_pb2.py:/app/model_update_pb2.py
+      - ./model_update_pb2_grpc.py:/app/model_update_pb2_grpc.py
+      - ./client.py:/app/client.py
+    command: ["python", "client.py"]
+    environment:
+      - SERVER_ADDRESS=fl-server:50051  # Point to the server service
+    restart: on-failure
+
+  fl-client-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    depends_on:
+      fl-server:
+        condition: service_healthy
+    volumes:
+      - ./model_update_pb2.py:/app/model_update_pb2.py
+      - ./model_update_pb2_grpc.py:/app/model_update_pb2_grpc.py
+      - ./client.py:/app/client.py
+    command: ["python", "client.py", "--client_id", "client_2"]
+    environment:
+      - SERVER_ADDRESS=fl-server:50051
+    restart: on-failure
+
+# You can add more clients by duplicating the fl-client-2 section and 
+# incrementing the client ID in the command

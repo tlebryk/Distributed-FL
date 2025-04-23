@@ -3,26 +3,13 @@ import io
 import time
 import zlib
 import pytest
-import torch
 import grpc
-import unittest.mock as mock
-from transformers import GPT2LMHeadModel
-from client import serialize_state_dict, get_model_update, run
-import model_update_pb2
-import model_update_pb2_grpc
-
-
-@pytest.fixture
-def gpt2_model():
-    """Fixture to provide a GPT2 model for testing."""
-    return GPT2LMHeadModel.from_pretrained("gpt2")
-
-
-@pytest.fixture
-def mock_grpc_channel():
-    """Fixture to mock the gRPC channel."""
-    with mock.patch("grpc.insecure_channel") as mock_channel:
-        yield mock_channel
+from unittest import mock
+import torch
+from transformers import AutoModelForCausalLM
+from client import FederatedClient, get_adapter_update
+import model_update_pb2 as model_update_pb2
+import model_update_pb2_grpc as model_update_pb2_grpc
 
 
 @pytest.fixture
@@ -32,184 +19,116 @@ def mock_stub():
     return stub
 
 
-class TestSerializeStateDict:
-    """Tests for the state dict serialization functionality."""
-
-    def test_serialize_state_dict(self, gpt2_model):
-        """Test that a model state dict can be serialized."""
-        state_dict = gpt2_model.state_dict()
-        serialized = serialize_state_dict(state_dict)
-
-        # Verify the output is bytes
-        assert isinstance(serialized, bytes)
-        assert len(serialized) > 0
-
-        # Verify the serialized data can be deserialized back
-        buffer = io.BytesIO(serialized)
-        deserialized_state_dict = torch.load(buffer)
-
-        # Check keys match
-        assert set(deserialized_state_dict.keys()) == set(state_dict.keys())
-
-        # Check some tensor values match
-        for key in state_dict:
-            assert torch.allclose(deserialized_state_dict[key], state_dict[key])
+@pytest.fixture
+def mock_channel():
+    """Fixture to mock the gRPC channel."""
+    channel = mock.Mock(spec=grpc.Channel)
+    return channel
 
 
-class TestGetModelUpdate:
-    """Tests for the model update generation functionality."""
-
-    def test_get_model_update(self, gpt2_model):
-        """Test that a model update can be generated with noise applied."""
-        # Get the original state dict for comparison
-        original_state_dict = gpt2_model.state_dict()
-
-        # Get the compressed update
-        compressed_update = get_model_update(gpt2_model)
-
-        # Verify the output is bytes and is compressed
-        assert isinstance(compressed_update, bytes)
-
-        # Decompress and deserialize
-        decompressed = zlib.decompress(compressed_update)
-        buffer = io.BytesIO(decompressed)
-        updated_state_dict = torch.load(buffer)
-
-        # Check keys match
-        assert set(updated_state_dict.keys()) == set(original_state_dict.keys())
-
-        # Verify that tensors are not identical (noise was added)
-        for key in original_state_dict:
-            assert not torch.allclose(
-                updated_state_dict[key], original_state_dict[key], atol=1e-6
-            )
-
-            # But verify they're close (since we only add small noise)
-            assert torch.allclose(
-                updated_state_dict[key], original_state_dict[key], atol=0.01
-            )
-
-
-class TestClientRun:
-    """Tests for the main client run function."""
-
-    def test_run_successfully_sends_update(
-        self, mock_grpc_channel, mock_stub, gpt2_model
-    ):
-        """Test that the client can successfully send an update to the server."""
-        # Set up mocks
-        mock_grpc_channel.return_value = mock.Mock()
-        mock_grpc_channel.return_value.__enter__ = mock.Mock(
-            return_value=mock_grpc_channel.return_value
-        )
-        mock_grpc_channel.return_value.__exit__ = mock.Mock(return_value=None)
-
-        # Set up the stub mock to return an acknowledgment
-        ack = model_update_pb2.Acknowledgement(success=True, message="Update received")
-        mock_stub.SubmitUpdate.return_value = ack
-
-        # Set up the mock for GetAggregatedModel
-        model_state = serialize_state_dict(gpt2_model.state_dict())
-        compressed_state = zlib.compress(model_state)
-        aggregated_model = model_update_pb2.AggregatedModel(
-            model_state=compressed_state, version=2
-        )
-        mock_stub.GetAggregatedModel.return_value = aggregated_model
-
-        # Patch the stub creation
+@pytest.fixture
+def client(mock_stub, mock_channel):
+    """Fixture to create a FederatedClient with mocked stub and channel."""
+    with mock.patch("grpc.insecure_channel", return_value=mock_channel):
         with mock.patch(
-            "model_update_pb2_grpc.FederatedLearningServiceStub", return_value=mock_stub
+            "distributed_fl.model_update_pb2_grpc.FederatedLearningServiceStub",
+            return_value=mock_stub,
         ):
-            # Patch time.sleep to avoid waiting
-            with mock.patch("time.sleep"):
-                # Patch the model loading to use our fixture
-                with mock.patch(
-                    "transformers.GPT2LMHeadModel.from_pretrained",
-                    return_value=gpt2_model,
-                ):
-                    # Run the client
-                    run()
+            client = FederatedClient(client_id="client_1")
+            client.channel = mock_channel
+            client.stub = mock_stub
+            client.initialize_model()
+            return client
 
-        # Verify the stub was called with appropriate arguments
-        mock_stub.SubmitUpdate.assert_called_once()
-        update_msg = mock_stub.SubmitUpdate.call_args[0][0]
-        assert update_msg.client_id == "client_1"
-        assert isinstance(update_msg.update, bytes)
-        assert update_msg.version == 1
-        assert isinstance(update_msg.timestamp, int)
 
-        # Verify GetAggregatedModel was called
-        mock_stub.GetAggregatedModel.assert_called_once()
-        request = mock_stub.GetAggregatedModel.call_args[0][0]
-        assert request.client_id == "client_1"
-        assert request.current_version == 1
+def test_initialize_model(client):
+    """Test that the model is initialized correctly."""
+    assert client.model is not None
+    assert isinstance(client.model, AutoModelForCausalLM)
 
-    def test_run_handles_missing_global_model(
-        self, mock_grpc_channel, mock_stub, gpt2_model
-    ):
-        """Test that the client handles the case when the global model is not yet updated."""
-        # Set up mocks
-        mock_grpc_channel.return_value = mock.Mock()
-        mock_grpc_channel.return_value.__enter__ = mock.Mock(
-            return_value=mock_grpc_channel.return_value
-        )
-        mock_grpc_channel.return_value.__exit__ = mock.Mock(return_value=None)
 
-        # Set up the stub mock to return an acknowledgment
-        ack = model_update_pb2.Acknowledgement(success=True, message="Update received")
-        mock_stub.SubmitUpdate.return_value = ack
+def test_connect_to_server_success(client, mock_stub):
+    """Test successful connection to the server without updates."""
+    response = model_update_pb2.ConnectResponse(
+        latest_version=1, update_available=False, model_state=b""
+    )
+    mock_stub.ConnectClient.return_value = response
 
-        # Set up the mock for GetAggregatedModel with empty model_state
-        aggregated_model = model_update_pb2.AggregatedModel(
-            model_state=b"", version=1  # Empty bytes
-        )
-        mock_stub.GetAggregatedModel.return_value = aggregated_model
+    success = client.connect_to_server()
+    assert success
+    assert client.current_version == 1
 
-        # Patch the stub creation
-        with mock.patch(
-            "model_update_pb2_grpc.FederatedLearningServiceStub", return_value=mock_stub
-        ):
-            # Patch time.sleep to avoid waiting
-            with mock.patch("time.sleep"):
-                # Patch the model loading to use our fixture
-                with mock.patch(
-                    "transformers.GPT2LMHeadModel.from_pretrained",
-                    return_value=gpt2_model,
-                ):
-                    # Capture stdout to verify the output
-                    with mock.patch("builtins.print") as mock_print:
-                        # Run the client
-                        run()
 
-                        # Verify the appropriate message was printed
-                        mock_print.assert_any_call("Global model not updated yet.")
+def test_connect_to_server_with_update(client, mock_stub):
+    """Test connection to the server with a model update."""
+    # Create a dummy adapter state
+    adapter_state = {"key": torch.tensor([1, 2, 3])}
+    buffer = io.BytesIO()
+    torch.save(adapter_state, buffer)
+    compressed_state = zlib.compress(buffer.getvalue())
 
-    def test_run_handles_grpc_error(self, mock_grpc_channel, mock_stub, gpt2_model):
-        """Test that the client handles gRPC errors gracefully."""
-        # Set up mocks
-        mock_grpc_channel.return_value = mock.Mock()
-        mock_grpc_channel.return_value.__enter__ = mock.Mock(
-            return_value=mock_grpc_channel.return_value
-        )
-        mock_grpc_channel.return_value.__exit__ = mock.Mock(return_value=None)
+    response = model_update_pb2.ConnectResponse(
+        latest_version=2, update_available=True, model_state=compressed_state
+    )
+    mock_stub.ConnectClient.return_value = response
 
-        # Make SubmitUpdate raise a gRPC error
-        mock_stub.SubmitUpdate.side_effect = grpc.RpcError("Connection failed")
+    with mock.patch.object(client.model, "load_state_dict") as mock_load_state_dict:
+        success = client.connect_to_server()
+        assert success
+        assert client.current_version == 2
+        mock_load_state_dict.assert_called_with(adapter_state, strict=False)
 
-        # Patch the stub creation
-        with mock.patch(
-            "model_update_pb2_grpc.FederatedLearningServiceStub", return_value=mock_stub
-        ):
-            # Patch time.sleep to avoid waiting
-            with mock.patch("time.sleep"):
-                # Patch the model loading to use our fixture
-                with mock.patch(
-                    "transformers.GPT2LMHeadModel.from_pretrained",
-                    return_value=gpt2_model,
-                ):
-                    # Test that an exception is raised
-                    with pytest.raises(grpc.RpcError):
-                        run()
 
-                    # Verify that SubmitUpdate was called
-                    mock_stub.SubmitUpdate.assert_called_once()
+def test_get_latest_model(client, mock_stub):
+    """Test fetching the latest model from the server."""
+    adapter_state = {"key": torch.tensor([4, 5, 6])}
+    buffer = io.BytesIO()
+    torch.save(adapter_state, buffer)
+    compressed_state = zlib.compress(buffer.getvalue())
+
+    response = model_update_pb2.AggregatedModel(version=3, model_state=compressed_state)
+    mock_stub.GetAggregatedModel.return_value = response
+
+    with mock.patch.object(client.model, "load_state_dict") as mock_load_state_dict:
+        success = client.get_latest_model()
+        assert success
+        assert client.current_version == 3
+        mock_load_state_dict.assert_called_with(adapter_state, strict=False)
+
+
+def test_train_and_submit_success(client, mock_stub):
+    """Test successful training and submission of an update."""
+    ack = model_update_pb2.SubmitAck(success=True, message="Update received")
+    mock_stub.SubmitUpdate.return_value = ack
+
+    with mock.patch("time.sleep", return_value=None):
+        success = client.train_and_submit()
+        assert success
+
+
+def test_train_and_submit_version_mismatch(client, mock_stub):
+    """Test handling of version mismatch during submission."""
+    ack = model_update_pb2.SubmitAck(
+        success=False, message="Update rejected due to outdated model"
+    )
+    mock_stub.SubmitUpdate.return_value = ack
+
+    with mock.patch.object(client, "get_latest_model") as mock_get_latest_model:
+        with mock.patch("time.sleep", return_value=None):
+            success = client.train_and_submit()
+            assert not success
+            mock_get_latest_model.assert_called()
+
+
+def test_run_training_loop_interrupt(client):
+    """Test graceful shutdown of the training loop."""
+    with mock.patch.object(client, "train_and_submit", side_effect=KeyboardInterrupt):
+        with pytest.raises(SystemExit):
+            client.run_training_loop()
+
+
+def test_shutdown(client):
+    """Test client shutdown procedure."""
+    client.shutdown()
+    assert not client.running
+    client.channel.close.assert_called_once()

@@ -4,18 +4,32 @@ grpc_update:
 	python -m grpc_tools.protoc -I. --python_out=distributed_fl --grpc_python_out=distributed_fl distributed_fl/model_update.proto
 
 build_server:
-	docker build -f Dockerfile.server -t server distributed_fl
+	docker build -f distributed_fl/Dockerfile.server -t server . --progress=plain
+
 build_client:
-	docker build -f Dockerfile.client -t client distributed_fl
+	docker build -f distributed_fl/Dockerfile.client -t client .
 
 run_server:
 	docker run -p 50051:50051 server
 
-docker_run_client_a:
+run_client_a:
 	docker run -p 50052:50052 client
 
-docker_run_client_b:
+run_client_b:
 	docker run -p 50053:50053 client
 
+client_entrypoint: 
+	docker run --rm -it -p 50052:50052 client bash
+
+
+server_entrypoint: 
+	docker run --rm -it -p 50051:50051 server bash 
+
 local_test:
-	cd distributed_fl && python -m pytest
+	cd distributed_fl && uv run python -m pytest
+
+local_server:
+	uv run python distributed_fl/server.py
+
+local_client:
+	uv run python distributed_fl/client.py

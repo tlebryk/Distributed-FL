@@ -1,34 +1,40 @@
-# Use a Python image with uv pre-installed
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+# An example of using standalone Python builds with multistage images.
 
-# Set the working directory
+# First, build the application in the `/app` directory
+FROM ghcr.io/astral-sh/uv:bookworm-slim AS builder
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+
+# Configure the Python directory so it is consistent
+ENV UV_PYTHON_INSTALL_DIR=/python
+
+# Only use the managed Python version
+ENV UV_PYTHON_PREFERENCE=only-managed
+
+# Install Python before the project for caching
+RUN uv python install 3.12
+
 WORKDIR /app
-
-# Enable bytecode compilation and set linking mode
-ENV UV_COMPILE_BYTECODE=1
-ENV UV_LINK_MODE=copy
-
-# Install project dependencies using uv.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=../uv.lock,target=uv.lock \
-    --mount=type=bind,source=../pyproject.toml,target=pyproject.toml \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --frozen --no-install-project --no-dev
-
-# Add the rest of the project source code.
 ADD . /app
-
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-# Make the virtual environment's executables available in PATH
+# Place executables in the environment at the front of the path
 ENV PATH="/app/.venv/bin:$PATH"
+# Then, use a final image without uv
+# FROM debian:bookworm-slim
 
-# Reset the entrypoint.
-ENTRYPOINT []
+# # Copy the Python version
+# COPY --from=builder --chown=python:python /python /python
 
-# Optionally, if your client needs to expose a port, you may do so; typically, clients just initiate outbound connections.
-# EXPOSE 9000
+# # Copy the application from the builder
+# COPY --from=builder --chown=app:app /app /app
 
-# Run the client. (Assumes your client code is in client/client.py.)
-# Adjust the arguments (e.g., the client_id) if needed.
-CMD ["python", "client/client.py", "--client_id", "client1"]
+# # Place executables in the environment at the front of the path
+# ENV PATH="/app/.venv/bin:$PATH"
+ENTRYPOINT ["/client_entrypoint.sh"]
+# Run the FastAPI application by default
+CMD ["python", "distributed_fl/client.py"]
