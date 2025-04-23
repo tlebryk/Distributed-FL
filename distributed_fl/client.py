@@ -81,10 +81,10 @@ class FederatedClient:
         self.running = True
         self.lock = threading.Lock()
 
-    def initialize_model(self, model_id="microsoft/bitnet-b1.58-2B-4T"):
-        """Load microsoft/bitnet-b1.58-2B-4T model and configure the PEFT adapter."""
+    def initialize_model(self, model_id="openai-community/gpt2"):
+        """Load openai-community/gpt2 model and configure the PEFT adapter."""
         logger.info(
-            "Loading microsoft/bitnet-b1.58-2B-4T model and configuring PEFT adapter..."
+            "Loading openai-community/gpt2 model and configuring PEFT adapter..."
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
@@ -111,9 +111,9 @@ class FederatedClient:
         self.model = get_peft_model(self.model, self.lora_config)
         logger.info("Model with PEFT adapter loaded.")
 
-    def initialize_tokenizer(self, model_id="microsoft/bitnet-b1.58-2B-4T"):
-        """Load microsoft/bitnet-b1.58-2B-4T tokenizer."""
-        logger.info("Loading microsoft/bitnet-b1.58-2B-4T tokenizer...")
+    def initialize_tokenizer(self, model_id="openai-community/gpt2"):
+        """Load openai-community/gpt2 tokenizer."""
+        logger.info("Loading openai-community/gpt2 tokenizer...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         # if no pad token, add it
         if self.tokenizer.pad_token is None:
