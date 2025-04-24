@@ -1,5 +1,4 @@
 # client.py
-# %%
 import argparse
 import datetime
 import io
@@ -21,11 +20,14 @@ from python_extractor import create_huggingface_dataset
 from training import LoraArguments, train_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# Import shared state from inference server
+from inference_server import shared_state, run_server
+
 logger = get_logger(__name__)
 
 torch.set_num_threads(4)
 
-PATH_TO_ADAPTERS = "./adapters"
+PATH_TO_ADAPTERS = "distributed_fl/adapters"
 
 os.makedirs(PATH_TO_ADAPTERS, exist_ok=True)
 
@@ -81,8 +83,6 @@ class FederatedClient:
         self.current_version = 1
         self.channel = grpc.insecure_channel(server_address)
         self.stub = model_update_pb2_grpc.FederatedLearningServiceStub(self.channel)
-        self.model = None
-        self.tokenizer = None
         self.lora_config = None
         self.running = True
         self.lock = threading.Lock()
@@ -125,51 +125,52 @@ class FederatedClient:
             logger.info(f"Error finding latest adapter version: {e}")
             return 0
 
-    def initialize_model(self, model_id="Qwen/Qwen2-0.5B-Instruct"):
-        """Load Qwen/Qwen2-0.5B-Instruct model and configure the PEFT adapter."""
+    def initialize_model(self, model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct"):
+        """Load Qwen/Qwen2.5-Coder-0.5B-Instruct model and configure the PEFT adapter."""
         logger.info(
-            "Loading Qwen/Qwen2-0.5B-Instruct model and configuring PEFT adapter..."
+            "Loading Qwen/Qwen2.5-Coder-0.5B-Instruct model and configuring PEFT adapter..."
         )
         # list folders in PATH_TO_ADAPTERS
         adapter_folders = os.listdir(PATH_TO_ADAPTERS)
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype=torch.bfloat16,
-            # device_maps="auto",
-        )
-        self.model = PeftModel.from_pretrained(
-            self.model,  # Get the original base model without adapters
-            os.path.join(PATH_TO_ADAPTERS, "latest"),
-            is_trainable=False,  # Set as needed
-        )
-        self.lora_config = LoraConfig(
-            task_type="CAUSAL_LM",
-            inference_mode=False,
-            r=8,
-            lora_alpha=32,
-            # lora_dropout=0.1,
-            # target_modules=[
-            #     "q_proj",
-            #     "v_proj",
-            #     "k_proj",
-            # "o_proj",
-            # "gate_proj",
-            # "up_proj",
-            # "down_proj",
-            # ],
-        )
+        with shared_state.lock:
+            shared_state.model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch.bfloat16,
+                # device_maps="auto",
+            )
+            shared_state.model = PeftModel.from_pretrained(
+                shared_state.model,  # Get the original base model without adapters
+                os.path.join(PATH_TO_ADAPTERS, "latest"),
+                is_trainable=False,  # Set as needed
+            )
+            self.lora_config = LoraConfig(
+                task_type="CAUSAL_LM",
+                inference_mode=False,
+                r=8,
+                lora_alpha=32,
+                # lora_dropout=0.1,
+                # target_modules=[
+                #     "q_proj",
+                #     "v_proj",
+                #     "k_proj",
+                # "o_proj",
+                # "gate_proj",
+                # "up_proj",
+                # "down_proj",
+                # ],
+            )
+            self.load_latest_adapter(acquire_lock=False)
+            logger.info("Model with PEFT adapter loaded.")
 
-        self.load_latest_adapter()
-        logger.info("Model with PEFT adapter loaded.")
-
-    def initialize_tokenizer(self, model_id="Qwen/Qwen2-0.5B-Instruct"):
-        """Load Qwen/Qwen2-0.5B-Instruct tokenizer."""
-        logger.info("Loading Qwen/Qwen2-0.5B-Instruct tokenizer...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        # if no pad token, add it
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+    def initialize_tokenizer(self, model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct"):
+        """Load Qwen/Qwen2.5-Coder-0.5B-Instruct tokenizer."""
+        logger.info("Loading Qwen/Qwen2.5-Coder-0.5B-Instruct tokenizer...")
+        with shared_state.lock:
+            shared_state.tokenizer = AutoTokenizer.from_pretrained(model_id)
+            # if no pad token, add it
+            if shared_state.tokenizer.pad_token is None:
+                shared_state.tokenizer.pad_token = shared_state.tokenizer.eos_token
         logger.info("Tokenizer loaded.")
 
     def connect_to_server(self):
@@ -195,7 +196,8 @@ class FederatedClient:
                     decompressed = zlib.decompress(version_info.model_state)
                     buffer = io.BytesIO(decompressed)
                     adapter_state = torch.load(buffer)
-                    self.model.load_state_dict(adapter_state, strict=False)
+                    with shared_state.lock:
+                        shared_state.model.load_state_dict(adapter_state, strict=False)
                     logger.info("Updated local model with latest adapter state")
             return True
         except Exception as e:
@@ -243,7 +245,8 @@ class FederatedClient:
                     decompressed = zlib.decompress(aggregated.model_state)
                     buffer = io.BytesIO(decompressed)
                     adapter_state = torch.load(buffer)
-                    self.model.load_state_dict(adapter_state, strict=False)
+                    with shared_state.lock:
+                        shared_state.model.load_state_dict(adapter_state, strict=False)
                     self.current_version = aggregated.version
                     logger.info(f"Updated model to version {self.current_version}")
                 return True
@@ -256,20 +259,23 @@ class FederatedClient:
 
     def train_and_submit(self, mode="debug"):
         """Simulate training and submit local update to the server."""
+        # Set training flag before training
+        shared_state.is_training = True
         try:
             logger.info("Training local model...")
             time.sleep(3)  # Simulate training time
             with self.lock:
-                update_payload = get_adapter_update(
-                    self.model, self.tokenizer, self.lora_config
-                )
-                if mode == "debug":
-                    payload_size_bytes = len(update_payload)
-                    payload_size_kb = payload_size_bytes / 1024
-                    payload_size_mb = payload_size_kb / 1024
-                    logger.info(
-                        f"Update payload size: {payload_size_bytes:,} bytes ({payload_size_kb:.2f} KB, {payload_size_mb:.4f} MB)"
+                with shared_state.lock:
+                    update_payload = get_adapter_update(
+                        shared_state.model, shared_state.tokenizer, self.lora_config
                     )
+                    if mode == "debug":
+                        payload_size_bytes = len(update_payload)
+                        payload_size_kb = payload_size_bytes / 1024
+                        payload_size_mb = payload_size_kb / 1024
+                        logger.info(
+                            f"Update payload size: {payload_size_bytes:,} bytes ({payload_size_kb:.2f} KB, {payload_size_mb:.4f} MB)"
+                        )
 
                 current_ver = self.current_version
             update_message = model_update_pb2.ModelUpdate(
@@ -293,6 +299,9 @@ class FederatedClient:
             logger.info(f"Error in training and submitting update: {e}")
             traceback.print_exc()
             return False
+        finally:
+            # Clear training flag after training
+            shared_state.is_training = False
 
     def run_training_loop(self, interval=10):
         """Main training loop with periodic update submissions."""
@@ -347,12 +356,8 @@ class FederatedClient:
         os.makedirs(version_dir, exist_ok=True)
 
         # Save adapter files
-        # adapter_path = os.path.join(version_dir, "adapter.safetensors")
-        # buffer = io.BytesIO()
-        # torch.save(adapter_state, buffer)
-        # with open(adapter_path, "wb") as f:
-        #     f.write(buffer.getvalue())
-        self.model.save_pretrained(version_dir)
+        with shared_state.lock:
+            shared_state.model.save_pretrained(version_dir)
 
         # Create metadata file
         metadata = {
@@ -364,15 +369,6 @@ class FederatedClient:
 
         with open(os.path.join(version_dir, "metadata.json"), "w") as f:
             json.dump(metadata, f, indent=2)
-
-        # Create empty adapter.json file (or save actual config if available)
-        # with open(os.path.join(version_dir, "adapter.json"), "w") as f:
-        #     if hasattr(self.model, "peft_config") and self.model.peft_config:
-        #         # If we have actual config, save it
-        #         json.dump(self.model.peft_config, f, indent=2)
-        #     else:
-        #         # Otherwise create an empty JSON object
-        #         json.dump({}, f)
 
         # Update symlink to point to latest version
         if create_symlink:
@@ -387,21 +383,39 @@ class FederatedClient:
         logger.info(f"Saved adapter version {version} to {version_dir}")
         return version_dir
 
-    def load_latest_adapter(self):
-        """Load the latest adapter from disk"""
-        # Find the latest version
-        # latest_version = self.find_latest_adapter_version()
-        self.model = PeftModel.from_pretrained(
-            self.model.get_base_model(),  # Get the original base model without adapters
-            os.path.join(PATH_TO_ADAPTERS, f"latest"),
-            is_trainable=False,  # Set as needed
-        )
+    def load_latest_adapter(self, acquire_lock=True):
+        """Load the latest adapter from disk
+
+        Args:
+            acquire_lock: Whether to acquire the shared state lock. Set to False
+                          if this method is called from a context that already
+                          holds the lock to prevent deadlock.
+        """
+        if acquire_lock:
+            with shared_state.lock:
+                shared_state.model = PeftModel.from_pretrained(
+                    shared_state.model.get_base_model(),
+                    os.path.join(PATH_TO_ADAPTERS, f"latest"),
+                    is_trainable=False,
+                )
+        else:
+            # Lock already held by caller
+            shared_state.model = PeftModel.from_pretrained(
+                shared_state.model.get_base_model(),
+                os.path.join(PATH_TO_ADAPTERS, f"latest"),
+                is_trainable=False,
+            )
 
 
-def run(client_id="client_1", server_address="localhost:50051", interval=10):
+def run(
+    client_id="client_1",
+    server_address="localhost:50051",
+    interval=10,
+    inference_host="127.0.0.1",
+    inference_port=5000,
+):
     """
-    Create and run the FederatedClient. The function accepts keyword arguments
-    for customization.
+    Create and run the FederatedClient and inference server.
     """
     client = FederatedClient(client_id=client_id, server_address=server_address)
     client.initialize_model()
@@ -409,6 +423,15 @@ def run(client_id="client_1", server_address="localhost:50051", interval=10):
     if not client.connect_to_server():
         logger.info("Failed to connect to server. Exiting.")
         return
+
+    # Start inference server in a separate thread
+    server_thread = threading.Thread(
+        target=run_server,
+        kwargs={"host": inference_host, "port": inference_port},
+        daemon=True,
+    )
+    server_thread.start()
+    logger.info(f"Inference server started at http://{inference_host}:{inference_port}")
 
     update_thread = client.subscribe_to_updates()
     try:
@@ -418,13 +441,16 @@ def run(client_id="client_1", server_address="localhost:50051", interval=10):
     finally:
         client.shutdown()
         update_thread.join(timeout=2)
+        # Server thread will terminate when main thread exits as it's a daemon
 
 
 def parse_args():
     """
     Parse command-line arguments and return them.
     """
-    parser = argparse.ArgumentParser(description="Federated Learning Client")
+    parser = argparse.ArgumentParser(
+        description="Federated Learning Client with Inference API"
+    )
     parser.add_argument(
         "--client_id",
         type=str,
@@ -443,10 +469,21 @@ def parse_args():
         default=10,
         help="Interval (in seconds) between training submissions",
     )
+    parser.add_argument(
+        "--inference_host",
+        type=str,
+        default="127.0.0.1",
+        help="Host address for inference server (local only)",
+    )
+    parser.add_argument(
+        "--inference_port",
+        type=int,
+        default=5000,
+        help="Port for inference server",
+    )
     return parser.parse_args()
 
 
-# %%
 if __name__ == "__main__":
     args = parse_args()
     run(**vars(args))
