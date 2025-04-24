@@ -1,0 +1,78 @@
+from flask import Flask, request, jsonify
+import threading
+import torch
+
+app = Flask(__name__)
+
+
+# Shared state between client and server
+class SharedState:
+    def __init__(self):
+        self.model = None
+        self.tokenizer = None
+        self.is_training = False
+        self.lock = threading.Lock()
+
+
+shared_state = SharedState()
+
+
+@app.route("/generate", methods=["POST"])
+def generate():
+    # Check if model is training
+    if shared_state.is_training:
+        return (
+            jsonify({"error": "Model is currently training. Please try again later."}),
+            503,
+        )
+
+    # Check if model is loaded
+    if shared_state.model is None or shared_state.tokenizer is None:
+        return jsonify({"error": "Model not initialized yet"}), 503
+
+    # Get prompt from request
+    data = request.json
+    if not data or "prompt" not in data:
+        return jsonify({"error": "Missing 'prompt' field in request"}), 400
+
+    prompt = data["prompt"]
+
+    try:
+        # Acquire lock for model access
+        with shared_state.lock:
+            # Tokenize input
+            inputs = shared_state.tokenizer(prompt, return_tensors="pt")
+
+            # Generate output
+            with torch.no_grad():
+                outputs = shared_state.model.generate(
+                    inputs["input_ids"],
+                    max_new_tokens=512,
+                    temperature=0.7,
+                    top_p=0.9,
+                    num_return_sequences=1,
+                    pad_token_id=shared_state.tokenizer.eos_token_id,
+                    do_sample=True,
+                )
+
+            # Decode output
+            generated_text = shared_state.tokenizer.decode(
+                outputs[0], skip_special_tokens=True
+            )
+
+            # Return only the generated part (without prompt)
+            # Note: This is a simplistic approach and might need adjustment based on the model
+            generated_only = generated_text[len(prompt) :].strip()
+
+            return jsonify({"generated_text": generated_only}), 200
+    except Exception as e:
+        return jsonify({"error": f"Generation error: {str(e)}"}), 500
+
+
+def run_server(host="127.0.0.1", port=5000):
+    app.run(host=host, port=port, debug=False, threaded=True)
+
+
+if __name__ == "__main__":
+    # This will only run if inference_server.py is executed directly
+    run_server()

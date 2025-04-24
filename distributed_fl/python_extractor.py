@@ -126,7 +126,7 @@ def create_huggingface_dataset(directory_path, pattern="*.py", function_name=Non
         "file_path": file_paths,
     }
 
-    return Dataset.from_dict(data)  # [:10]
+    return Dataset.from_dict(data).select(range(5))
 
 
 # Example usage

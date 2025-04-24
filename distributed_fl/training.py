@@ -197,6 +197,15 @@ def train_model(
         model.peft_config[adapter].inference_mode = False
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
+    adapter_name = model.active_adapter
+    for name, param in model.named_parameters():
+
+        if (
+            adapter_name in name or "lora_" in name
+        ):  # Adjust this condition as necessary for your adapter type
+            param.requires_grad = True
+            # print(f"  - Enabling grad for: {name}") # Uncomment for detailed logging
+
     model.train()
     trainer = SFTTrainer(
         model,
@@ -208,6 +217,7 @@ def train_model(
     # for name, param in model.named_parameters():
     #     if not param.requires_grad:
     #         print(f"{name} is frozen.")
+    print("jhere")
     model.print_trainable_parameters()
     training_results = trainer.train()
 
@@ -288,7 +298,7 @@ def run_example():
     """Example of how to use the training function with LoRA."""
     # Load model with quantization
     model, tokenizer = load_and_quantize_model(
-        model_name_or_path="Qwen/Qwen2-0.5B-Instruct",
+        model_name_or_path="Qwen/Qwen2.5-Coder-0.5B-Instruct",
         # use_8bit=True,  # Use 8-bit quantization
     )
     lora_config = LoraConfig(
