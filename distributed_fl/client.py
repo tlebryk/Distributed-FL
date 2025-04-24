@@ -125,10 +125,10 @@ class FederatedClient:
             logger.info(f"Error finding latest adapter version: {e}")
             return 0
 
-    def initialize_model(self, model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct"):
-        """Load Qwen/Qwen2.5-Coder-0.5B-Instruct model and configure the PEFT adapter."""
+    def initialize_model(self, model_id="Qwen/Qwen2-0.5B-Instruct"):
+        """Load Qwen/Qwen2-0.5B-Instruct model and configure the PEFT adapter."""
         logger.info(
-            "Loading Qwen/Qwen2.5-Coder-0.5B-Instruct model and configuring PEFT adapter..."
+            "Loading Qwen/Qwen2-0.5B-Instruct model and configuring PEFT adapter..."
         )
         # list folders in PATH_TO_ADAPTERS
         adapter_folders = os.listdir(PATH_TO_ADAPTERS)
@@ -163,9 +163,9 @@ class FederatedClient:
         self.load_latest_adapter()
         logger.info("Model with PEFT adapter loaded.")
 
-    def initialize_tokenizer(self, model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct"):
-        """Load Qwen/Qwen2.5-Coder-0.5B-Instruct tokenizer."""
-        logger.info("Loading Qwen/Qwen2.5-Coder-0.5B-Instruct tokenizer...")
+    def initialize_tokenizer(self, model_id="Qwen/Qwen2-0.5B-Instruct"):
+        """Load Qwen/Qwen2-0.5B-Instruct tokenizer."""
+        logger.info("Loading Qwen/Qwen2-0.5B-Instruct tokenizer...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         # if no pad token, add it
         if self.tokenizer.pad_token is None:

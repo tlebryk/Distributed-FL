@@ -1,0 +1,7 @@
+# Exclude virtual environments, caches, and other unneeded files
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.log
+*.tmp
