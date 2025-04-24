@@ -55,15 +55,11 @@ def get_adapter_update(model, tokenizer):
         "/home/tlebryk/262_distributed_systems/Distributed-FL/distributed_fl/tests"
     )
     print(f"{len(train_dataset)=}")
-    # print(f"{train_dataset[0]=}")
     # train model
     model, metrics = train_model(
         model,
         tokenizer,
         train_dataset,
-        # model_args=model_args,
-        # training_args=training_args,
-        # data_args=data_args,
     )
     updated_adapter_state = {}
     for key, tensor in adapter_state.items():

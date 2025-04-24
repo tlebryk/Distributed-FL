@@ -1,43 +1,21 @@
 # %%
-from benchmark import HumanEvalBenchmark
-from agent import LoraHuggingFaceAgent
-import logging
-import pandas as pd
-
-# logging.basicConfig(level=logging.DEBUG)
-
-human_eval = HumanEvalBenchmark()
-code_agent = LoraHuggingFaceAgent(
-    model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct", adapter_path="./adapters/latest"
-)
-
-human_eval.load_dataset()
-
-model = code_agent.model
-tokenizer = code_agent.tokenizer
-# get first three rows of dataset
-human_eval.dataset = human_eval.dataset.select(range(3))
-# %%
-results = human_eval.run(code_agent.model, code_agent.tokenizer)
-df = pd.DataFrame(results)
-df.success.value_counts()
-
-# %%
-import logging
-import pandas as pd
+import argparse
 import csv
 import json
+import logging
 from datetime import datetime
+
+import pandas as pd
+from agent import LoraHuggingFaceAgent
 from benchmark import HumanEvalBenchmark
 from client import FederatedClient
 
 # Constants
-RESULTS_CSV = "experiments.csv"
 
 # --- Persistence helpers ---
 
 
-def load_previous_results(path=RESULTS_CSV):
+def load_previous_results(path):
     """
     Read past runs from CSV. Returns a list of dicts or empty list if none.
     """
@@ -49,7 +27,7 @@ def load_previous_results(path=RESULTS_CSV):
         return []
 
 
-def save_run_result(run_info, path=RESULTS_CSV):
+def save_run_result(run_info, path):
     """
     Append a new run_info dict to the CSV (creates file if needed).
     """
@@ -87,26 +65,41 @@ def get_best_success(runs):
 
 # --- Main evaluation with persistence ---
 
-if __name__ == "__main__":
+
+def evaluate(
+    code_agent, benchmark, results_csv: str = "experiments.csv", mode: str = "test"
+) -> bool:
+    # mode is test or prod
+    """
+    Evaluate the current model using the HumanEval benchmark.
+
+    Args:
+        mode: Which mode to run in. test or prod
+
+    Side effects:
+        - Writes a line to the "experiments.csv" file.
+        - Prints logging messages to the console.
+    """
     logging.basicConfig(level=logging.INFO)
 
     # 1. Load previous experiments
-    past_runs = load_previous_results()
+    past_runs = load_previous_results(results_csv)
     best_pct = get_best_success(past_runs)
     logging.info(f"Best previous percent_success: {best_pct:.2f}%")
 
     # 2. Setup model & dataset
-    human_eval = HumanEvalBenchmark()
-    client = FederatedClient(client_id="client_1", server_address="localhost:50051")
-    human_eval.load_dataset()
-    client.initialize_model()
-    client.initialize_tokenizer()
 
-    # 3. Restrict to first N examples if desired
-    human_eval.dataset = human_eval.dataset.select(range(5))
+    benchmark.load_dataset()
 
-    # 4. Run benchmark
-    results = human_eval.run_example_loop(client.model, client.tokenizer)
+    model = code_agent.model
+    tokenizer = code_agent.tokenizer
+    # get first three rows of dataset
+    benchmark.dataset = benchmark.dataset.select(range(3))
+    # %%
+    results = benchmark.run(code_agent.model, code_agent.tokenizer)
+    df = pd.DataFrame(results)
+    df.success.value_counts()
+
     current_pct = compute_percent_success(results)
     logging.info(f"Current run percent_success: {current_pct:.2f}%")
 
@@ -115,13 +108,30 @@ if __name__ == "__main__":
         "run_id": datetime.utcnow().isoformat(),
         "timestamp": datetime.now().isoformat(),
         "percent_success": f"{current_pct:.2f}",
+        "eval_rows": str(len(benchmark.dataset)),
         "hyperparameters": json.dumps({}),  # fill in if needed
     }
-    save_run_result(run_info)
+    save_run_result(run_info, results_csv)
     logging.info("Run result saved to experiments.csv")
 
     # 6. Compare to best and report
     if current_pct < best_pct:
         logging.warning("Current run underperforms best run — retraining advised.")
+        return False
     else:
-        logging.info("Current run matches or exceeds best run.")
+        # logging.info("Current run matches or exceeds best run.")
+        return True
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--results_csv", type=str, default="experiments.csv")
+    parser.add_argument("--mode", type=str, default="test")
+    args = parser.parse_args()
+    human_eval = HumanEvalBenchmark()
+    code_agent = LoraHuggingFaceAgent(
+        model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
+        adapter_path="./distributed_fl/adapters/latest",
+    )
+    evaluate(code_agent, human_eval, results_csv=args.results_csv, mode=args.mode)
