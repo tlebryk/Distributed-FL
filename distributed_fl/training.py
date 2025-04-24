@@ -197,6 +197,15 @@ def train_model(
         model.peft_config[adapter].inference_mode = False
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
+    adapter_name = model.active_adapter
+    for name, param in model.named_parameters():
+
+        if (
+            adapter_name in name or "lora_" in name
+        ):  # Adjust this condition as necessary for your adapter type
+            param.requires_grad = True
+            # print(f"  - Enabling grad for: {name}") # Uncomment for detailed logging
+
     model.train()
     trainer = SFTTrainer(
         model,
