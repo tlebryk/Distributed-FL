@@ -126,7 +126,6 @@ def train_model(
     model_args: Optional[ModelArguments] = None,
     training_args: Optional[CustomTrainingArguments] = None,
     data_args: Optional[DataArguments] = None,
-    lora_args: Optional[LoraArguments] = None,
 ) -> Tuple[PreTrainedModel, Dict[str, Any]]:
     """
     Train a causal language model on a dataset of prompt-completion pairs.
@@ -149,7 +148,6 @@ def train_model(
     model_args = model_args or ModelArguments()
     training_args = training_args or CustomTrainingArguments()
     data_args = data_args or DataArguments()
-    lora_args = lora_args or LoraConfig()  # use default lora config.
 
     # Create output directory if it doesn't exist
     os.makedirs(model_args.output_dir, exist_ok=True)
@@ -192,21 +190,23 @@ def train_model(
         logging_steps=1,  # Log after every batch; adjust as needed.
         disable_tqdm=False,  # Ensure the tqdm progress bar is enabled.
     )
-    for adapter in model.active_adapters:
-        # Enable training for all active adapters
-        model.peft_config[adapter].inference_mode = False
-    if hasattr(model, "enable_input_require_grads"):
-        model.enable_input_require_grads()
-    adapter_name = model.active_adapter
-    for name, param in model.named_parameters():
-
-        if (
-            adapter_name in name or "lora_" in name
-        ):  # Adjust this condition as necessary for your adapter type
-            param.requires_grad = True
-            # print(f"  - Enabling grad for: {name}") # Uncomment for detailed logging
-
     model.train()
+    if isinstance(model, PeftModel):
+        for adapter in model.active_adapters:
+            # Enable training for all active adapters
+            model.peft_config[adapter].inference_mode = False
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        adapter_name = model.active_adapter
+        for name, param in model.named_parameters():
+
+            if (
+                adapter_name in name or "lora_" in name
+            ):  # Adjust this condition as necessary for your adapter type
+                param.requires_grad = True
+                # print(f"  - Enabling grad for: {name}") # Uncomment for detailed logging
+        print("jhere")
+        model.print_trainable_parameters()
     trainer = SFTTrainer(
         model,
         train_dataset=train_dataset,
@@ -217,8 +217,7 @@ def train_model(
     # for name, param in model.named_parameters():
     #     if not param.requires_grad:
     #         print(f"{name} is frozen.")
-    print("jhere")
-    model.print_trainable_parameters()
+
     training_results = trainer.train()
 
     # Train the model
