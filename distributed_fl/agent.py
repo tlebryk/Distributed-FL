@@ -121,7 +121,7 @@ class LoraHuggingFaceAgent(CodeGenerationAgent):
         # latest_version = self.find_latest_adapter_version()
         self.model = PeftModel.from_pretrained(
             self.model.get_base_model(),  # Get the original base model without adapters
-            os.path.join(PATH_TO_ADAPTERS, f"latest"),
+            os.path.join(PATH_TO_ADAPTERS, "central", f"latest"),
             is_trainable=False,  # Set as needed
         )
 

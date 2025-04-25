@@ -13,6 +13,7 @@ import torch
 from eval_script import evaluate
 from benchmark import HumanEvalBenchmark
 from agent import LoraHuggingFaceAgent
+from safetensors.torch import load_file
 
 
 class FederatedLearningServiceServicer(
@@ -36,6 +37,12 @@ class FederatedLearningServiceServicer(
         if mode == "test":
             self.benchmark.dataset = self.benchmark.dataset.select(range(3))
 
+    @staticmethod
+    def _load_safetensors_from_bytes(raw: bytes):
+        buffer = io.BytesIO(raw)
+        # load_file accepts a path OR a file-like object
+        return load_file(buffer)  # dict[str, torch.Tensor]
+
     def SubmitUpdate(self, request, context):
         client_id = request.client_id
         client_version = request.version
@@ -48,10 +55,8 @@ class FederatedLearningServiceServicer(
             )
 
         try:
-            # Decompress and deserialize the adapter update
-            decompressed = zlib.decompress(request.update)
-            buffer = io.BytesIO(decompressed)
-            adapter_update = torch.load(buffer)
+            adapter_update = self._load_safetensors_from_bytes(request.update)
+
             print(
                 f"Received adapter update from {request.client_id} (version: {request.version})."
             )
@@ -108,8 +113,9 @@ class FederatedLearningServiceServicer(
 
             code_agent = LoraHuggingFaceAgent(
                 model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
-                adapter_path="./distributed_fl/adapters/latest",
+                adapter_path="./distributed_fl/adapters/central/latest",
             )
+            # TODO: integrate latest adapter...
             result = evaluate(
                 code_agent, self.benchmark, results_csv="experiments.csv", mode="prod"
             )
