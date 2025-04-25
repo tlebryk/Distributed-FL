@@ -10,7 +10,10 @@ build_client:
 	docker build -f distributed_fl/Dockerfile.client -t client .
 
 run_server:
-	docker run -p 50051:50051 server
+	docker run -p 50051:50051 \
+	-v ./distributed_fl:/app/distributed_fl \
+	-v ~/.cache/huggingface/:/root/.cache/huggingface \
+	server
 
 run_client_a:
 	docker run -p 50052:50052 client
@@ -23,7 +26,10 @@ client_entrypoint:
 
 
 server_entrypoint: 
-	docker run --rm -it -p 50051:50051 server bash 
+	docker run --rm -it -p 50051:50051 \
+	-v ./distributed_fl:/app/distributed_fl \
+	-v ~/.cache/huggingface/:/root/.cache/huggingface \
+	server bash 
 
 local_test:
 	cd distributed_fl && uv run python -m pytest

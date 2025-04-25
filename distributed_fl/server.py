@@ -18,6 +18,7 @@ from benchmark import HumanEvalBenchmark
 from agent import LoraHuggingFaceAgent
 from safetensors.torch import load_file
 from logger import get_logger
+from kazoo.client import KazooClient
 
 import model_update_pb2
 import model_update_pb2_grpc
@@ -45,7 +46,7 @@ class DecodedModelUpdate(NamedTuple):
 class FederatedLearningServiceServicer(
     model_update_pb2_grpc.FederatedLearningServiceServicer
 ):
-    def __init__(self, mode="test"):
+    def __init__(self, mode="test", zk_hosts="127.0.0.1:2181"):
         # Store received adapter updates
         self.update_requests = []
         self.global_adapter_state = None  # Aggregated adapter weights
@@ -62,6 +63,8 @@ class FederatedLearningServiceServicer(
 
         if mode == "test":
             self.benchmark.dataset = self.benchmark.dataset.select(range(3))
+        self.zk = KazooClient(hosts=zk_hosts)
+        self.zk.start()
 
     @staticmethod
     def _load_safetensors_from_bytes(raw: bytes):
@@ -75,6 +78,38 @@ class FederatedLearningServiceServicer(
             return load_file(tmp_path)  # dict[str, torch.Tensor]
         finally:
             os.remove(tmp_path)
+
+    def update_client_weight(self, client_id, weight):
+
+        # 3. Ensure the parent path exists
+        self.zk.ensure_path("/myapp/clients")
+
+        # 4. Create or update a znode for client_id → weight
+        client_id = "client123"
+        weight = 0.42
+
+        path = f"/myapp/clients/{client_id}"
+        data = str(weight).encode("utf-8")
+
+        if self.zk.exists(path):
+            self.zk.set(path, data)
+        else:
+            self.zk.create(path, data, makepath=True)
+
+        print(f"Set {path} = {weight}")
+
+    def get_client_weight(self, client_id):
+
+        path = f"/myapp/clients/{client_id}"
+        weight = 0.5
+        if self.zk.exists(path):
+            raw, stat = self.zk.get(path)
+            weight = float(raw.decode("utf-8"))
+            print(f"Weight for {client_id}: {weight}")
+        else:
+            print(f"No entry for {client_id}")
+
+        return weight
 
     def SubmitUpdate(self, request, context):
         client_id = request.client_id
@@ -345,6 +380,8 @@ def serve():
     except KeyboardInterrupt:
         logger.info("Server shutting down...")
         server.stop(0)
+        server.zk.stop()
+        server.zk.close()
 
 
 if __name__ == "__main__":
