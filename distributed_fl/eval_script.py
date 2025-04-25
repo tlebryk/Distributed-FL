@@ -8,7 +8,6 @@ from datetime import datetime
 import pandas as pd
 from agent import LoraHuggingFaceAgent
 from benchmark import HumanEvalBenchmark
-from client import FederatedClient
 
 # Constants
 
@@ -89,12 +88,9 @@ def evaluate(
 
     # 2. Setup model & dataset
 
-    benchmark.load_dataset()
-
     model = code_agent.model
     tokenizer = code_agent.tokenizer
     # get first three rows of dataset
-    benchmark.dataset = benchmark.dataset.select(range(3))
     # %%
     results = benchmark.run(code_agent.model, code_agent.tokenizer)
     df = pd.DataFrame(results)
@@ -134,4 +130,6 @@ if __name__ == "__main__":
         model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
         adapter_path="./distributed_fl/adapters/latest",
     )
+    human_eval.load_dataset()
+    human_eval.dataset = human_eval.dataset.select(range(3))
     evaluate(code_agent, human_eval, results_csv=args.results_csv, mode=args.mode)

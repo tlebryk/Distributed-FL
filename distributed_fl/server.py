@@ -10,12 +10,15 @@ import grpc
 import model_update_pb2
 import model_update_pb2_grpc
 import torch
+from eval_script import evaluate
+from benchmark import HumanEvalBenchmark
+from agent import LoraHuggingFaceAgent
 
 
 class FederatedLearningServiceServicer(
     model_update_pb2_grpc.FederatedLearningServiceServicer
 ):
-    def __init__(self):
+    def __init__(self, mode="test"):
         # Store received adapter updates
         self.updates = []
         self.global_adapter_state = None  # Aggregated adapter weights
@@ -27,6 +30,11 @@ class FederatedLearningServiceServicer(
 
         # Map of client_id to notification queues for update streaming
         self.notification_queues = {}  # {client_id: Queue()}
+        self.benchmark = HumanEvalBenchmark()
+        self.benchmark.load_dataset()
+
+        if mode == "test":
+            self.benchmark.dataset = self.benchmark.dataset.select(range(3))
 
     def SubmitUpdate(self, request, context):
         client_id = request.client_id
@@ -57,7 +65,7 @@ class FederatedLearningServiceServicer(
 
             # Aggregate once two or more updates are received (for testing)
             with self.update_lock:
-                if len(self.updates) >= 2:
+                if len(self.updates) >= 1:  # 2
                     aggregated_state = {}
                     # Assume all updates have matching keys
                     for key in self.updates[0].keys():
@@ -95,20 +103,34 @@ class FederatedLearningServiceServicer(
         try:
             # Serialize and compress the aggregated adapter state
             buffer = io.BytesIO()
-            torch.save(self.global_adapter_state, buffer)
-            serialized = buffer.getvalue()
-            compressed = zlib.compress(serialized)
-            print(
-                f"Sending aggregated adapter state (version: {self.version}) to {request.client_id}."
-            )
+            # TODO: retry logic
+            # implement eval loop and send if good update
 
-            # Update client's tracked version
-            if client_id in self.connected_clients:
-                self.connected_clients[client_id]["version"] = self.version
-
-            return model_update_pb2.AggregatedModel(
-                model_state=compressed, version=self.version
+            code_agent = LoraHuggingFaceAgent(
+                model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
+                adapter_path="./distributed_fl/adapters/latest",
             )
+            result = evaluate(
+                code_agent, self.benchmark, results_csv="experiments.csv", mode="prod"
+            )
+            if result:
+                torch.save(self.global_adapter_state, buffer)
+                serialized = buffer.getvalue()
+                compressed = zlib.compress(serialized)
+                print(
+                    f"Sending aggregated adapter state (version: {self.version}) to {request.client_id}."
+                )
+
+                # Update client's tracked version
+                if client_id in self.connected_clients:
+                    self.connected_clients[client_id]["version"] = self.version
+                return model_update_pb2.AggregatedModel(
+                    model_state=compressed, version=self.version
+                )
+            else:
+                context.set_details("Bad update")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                model_update_pb2.AggregatedModel()
         except Exception as e:
             print("Error in GetAggregatedModel:", e)
             context.set_details(str(e))
