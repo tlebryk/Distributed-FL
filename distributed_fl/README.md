@@ -21,6 +21,14 @@ uv sync
 
 ### Run the server
 ```bash
+make zookeeper_build
+```
+
+```bash
+make zookeeper_run
+```
+
+```bash
 make local_server
 ```
 ### Run a client

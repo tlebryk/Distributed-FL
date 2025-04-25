@@ -39,3 +39,9 @@ local_server:
 
 local_client:
 	uv run python distributed_fl/client.py
+
+zookeeper_build:
+	docker build -t my-zk:latest -f distributed_fl/Dockerfile.zookeeper .
+
+zookeeper_run:
+	docker run -d --name zk -p 2181:2181 my-zk:latest
