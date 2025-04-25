@@ -205,7 +205,6 @@ def train_model(
             ):  # Adjust this condition as necessary for your adapter type
                 param.requires_grad = True
                 # print(f"  - Enabling grad for: {name}") # Uncomment for detailed logging
-        print("jhere")
         model.print_trainable_parameters()
     trainer = SFTTrainer(
         model,
@@ -226,8 +225,8 @@ def train_model(
     # )
 
     # TODO: figure out when and where to save model
-    # trainer.save_model(model_args.output_dir)
-    # tokenizer.save_pretrained(model_args.output_dir)
+    trainer.save_model(model_args.output_dir)
+    tokenizer.save_pretrained(model_args.output_dir)
 
     # Also save training arguments
     with open(os.path.join(model_args.output_dir, "training_args.txt"), "w") as f:

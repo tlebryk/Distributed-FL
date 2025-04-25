@@ -241,7 +241,7 @@ class FederatedClient:
         print(f"{len(train_dataset)=}")
         # train agent.model
         personal_adapters = os.path.join(PATH_TO_ADAPTERS, "personal")
-        personal_latest_version = self.get_latest_version(personal_adapters)
+        personal_latest_version = self._get_latest_version(personal_adapters)
         output_dir = os.path.join(personal_adapters, str(personal_latest_version + 1))
         model_args = ModelArguments(output_dir=output_dir)
 
@@ -253,17 +253,9 @@ class FederatedClient:
         )
         # load adapter.safetensors from output_dir
         bytes_ = self._read_safetensors_bytes(
-            os.path.join(output_dir, "adapter.safetensors")
+            os.path.join(output_dir, "adapter_model.safetensors")
         )
         return bytes_
-        # agent.model.save_pretrained(personal_adapters)
-        # updated_adapter_state = {}
-        # for key, tensor in adapter_state.items():
-        #     # noise = torch.randn_like(tensor) * 0.001
-        #     updated_adapter_state[key] = tensor  # + noise
-        # payload = serialize_state_dict(updated_adapter_state)
-        # compressed_payload = zlib.compress(payload)
-        # return compressed_payload
 
     @staticmethod
     def _read_safetensors_bytes(path: str) -> bytes:
@@ -306,8 +298,7 @@ class FederatedClient:
                 version = int(match.group(1))
         return version
 
-    @staticmethod
-    def get_latest_version(dir_path: str) -> int:
+    def _get_latest_version(self, dir_path: str) -> int:
         """
         Scans the contents of the given directory and returns the highest version
         number found among its entries, based on 'v<number>' segments.
