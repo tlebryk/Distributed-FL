@@ -63,8 +63,11 @@ class FederatedLearningServiceServicer(
 
         if mode == "test":
             self.benchmark.dataset = self.benchmark.dataset.select(range(3))
-        self.zk = KazooClient(hosts=zk_hosts)
-        self.zk.start()
+        try:
+            self.zk = KazooClient(hosts=zk_hosts)
+            self.zk.start()
+        except:
+            self.zk = None
 
     @staticmethod
     def _load_safetensors_from_bytes(raw: bytes):
@@ -151,10 +154,22 @@ class FederatedLearningServiceServicer(
                     aggregated_state = {}
                     # Assume all updates have matching keys
                     for key in self.update_requests[0].update.keys():
-                        aggregated_state[key] = sum(
-                            update_requests.update[key]
-                            for update_requests in self.update_requests
-                        ) / len(self.update_requests)
+                        aggregated_state[key] = 0
+                        total_weight = 0
+                        for update_requests in self.update_requests:
+                            # allow some zk tolerance
+                            if self.zk is not None:
+                                weight = self.get_client_weight(
+                                    update_requests.client_id
+                                )
+                            else:
+                                weight = 1
+                            aggregated_state[key] += (
+                                update_requests.update[key] * weight
+                            )
+                            total_weight += weight
+
+                        aggregated_state[key] /= total_weight
                     self.global_adapter_state = aggregated_state
                     self.version += 1
                     logger.info("Aggregated global adapter state updated.")
