@@ -5,6 +5,7 @@ import threading
 import os
 import tempfile
 import time
+from typing import NamedTuple, Dict, Any
 import zlib
 from concurrent import futures
 
@@ -18,9 +19,27 @@ from agent import LoraHuggingFaceAgent
 from safetensors.torch import load_file
 from logger import get_logger
 
+import model_update_pb2
+import model_update_pb2_grpc
+
 logger = get_logger(__name__)
 
 PATH_TO_ADAPTERS = "./distributed_fl/adapters"
+
+
+# @dataclass
+# class ClientUpdate:
+#     client_id: str
+#     version: int
+#     weight: float
+#     adapter_state: Dict[str, Any]  # your tensor dict
+
+
+class DecodedModelUpdate(NamedTuple):
+    client_id: str
+    update: Dict[str, Any]
+    version: int
+    timestamp: int
 
 
 class FederatedLearningServiceServicer(
@@ -70,9 +89,15 @@ class FederatedLearningServiceServicer(
 
         try:
             client_adapter_path = os.path.join(
-                PATH_TO_ADAPTERS, "clients", client_id, client_version
+                PATH_TO_ADAPTERS, "clients", client_id, f"v{client_version}"
             )
-            adapter_update = self._load_safetensors_from_bytes(request.update)
+            decoded_dict = self._load_safetensors_from_bytes(request.update)
+            decoded_msg = DecodedModelUpdate(
+                client_id=request.client_id,
+                update=decoded_dict,
+                version=request.version,
+                timestamp=request.timestamp,
+            )
 
             logger.info(
                 f"Received adapter update from {request.client_id} (version: {request.version})."
@@ -83,21 +108,22 @@ class FederatedLearningServiceServicer(
                 self.connected_clients[client_id]["version"] = client_version
                 self.connected_clients[client_id]["last_seen"] = time.time()
 
-            self.updates.append(adapter_update)
+            self.update_request.append(decoded_dict)
 
             # Aggregate once two or more updates are received (for testing)
             with self.update_lock:
-                if len(self.updates) >= 1:  # 2
+                if len(self.update_request) >= 1:  # 2
                     aggregated_state = {}
                     # Assume all updates have matching keys
-                    for key in self.updates[0].keys():
+                    for key in self.update_request[0].update.keys():
                         aggregated_state[key] = sum(
-                            update[key] for update in self.updates
-                        ) / len(self.updates)
+                            update_request.update[key]
+                            for update_request in self.update_request
+                        ) / len(self.update_request)
                     self.global_adapter_state = aggregated_state
                     self.version += 1
                     logger.info("Aggregated global adapter state updated.")
-                    self.updates = []  # Reset for the next round
+                    self.update_request = []  # Reset for the next round
 
                     # Notify all subscribed clients of the new model
                     self._notify_clients_of_update()
