@@ -47,7 +47,7 @@ class FederatedLearningServiceServicer(
 ):
     def __init__(self, mode="test"):
         # Store received adapter updates
-        self.updates = []
+        self.update_requests = []
         self.global_adapter_state = None  # Aggregated adapter weights
         self.version = 1
 
@@ -108,22 +108,22 @@ class FederatedLearningServiceServicer(
                 self.connected_clients[client_id]["version"] = client_version
                 self.connected_clients[client_id]["last_seen"] = time.time()
 
-            self.update_request.append(decoded_dict)
+            self.update_requests.append(decoded_msg)
 
             # Aggregate once two or more updates are received (for testing)
             with self.update_lock:
-                if len(self.update_request) >= 1:  # 2
+                if len(self.update_requests) >= 1:  # 2
                     aggregated_state = {}
                     # Assume all updates have matching keys
-                    for key in self.update_request[0].update.keys():
+                    for key in self.update_requests[0].update.keys():
                         aggregated_state[key] = sum(
-                            update_request.update[key]
-                            for update_request in self.update_request
-                        ) / len(self.update_request)
+                            update_requests.update[key]
+                            for update_requests in self.update_requests
+                        ) / len(self.update_requests)
                     self.global_adapter_state = aggregated_state
                     self.version += 1
                     logger.info("Aggregated global adapter state updated.")
-                    self.update_request = []  # Reset for the next round
+                    self.update_requests = []  # Reset for the next round
 
                     # Notify all subscribed clients of the new model
                     self._notify_clients_of_update()
