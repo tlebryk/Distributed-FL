@@ -8,9 +8,13 @@ dependencies = [
     "flask>=3.1.0",
     "grpcio>=1.71.0",
     "grpcio-tools>=1.62.3",
+    "pandas>=2.2.3",
     "peft>=0.15.2",
     "torch>=2.6.0",
     "transformers>=4.51.3",
+    "datasets>=3.5.0",
+    "trl>=0.16.1",
+    "kazoo>=2.10.0",
 ]
 
 [dependency-groups]
@@ -22,6 +26,5 @@ dev = [
     "pytest-env>=1.1.5",
 ]
 ml = [
-    "datasets>=3.5.0",
-    "trl>=0.16.1",
+
 ]

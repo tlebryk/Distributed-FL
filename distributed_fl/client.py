@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -18,7 +19,7 @@ import torch
 from logger import get_logger
 from peft import LoraConfig, get_peft_model, PeftModel
 from python_extractor import create_huggingface_dataset
-from training import LoraArguments, train_model
+from training import LoraArguments, train_model, ModelArguments
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from agent import LoraHuggingFaceAgent
 
@@ -30,44 +31,17 @@ PATH_TO_ADAPTERS = "./distributed_fl/adapters"
 
 os.makedirs(PATH_TO_ADAPTERS, exist_ok=True)
 
+# TODO: switch to streaming
+CHANNEL_OPTS = [
+    ("grpc.max_send_message_length", 50 * 1024 * 1024),  # 100 MiB
+    ("grpc.max_receive_message_length", 50 * 1024 * 1024),
+]
+
 
 def serialize_state_dict(state_dict):
     buffer = io.BytesIO()
     torch.save(state_dict, buffer)
     return buffer.getvalue()
-
-
-def get_adapter_update(model, tokenizer):
-    """
-    Extract adapter-specific parameters, simulate a local training update by adding
-    small Gaussian noise, and then compress the serialized adapter update.
-    """
-    state = model.state_dict()
-    adapter_state = {k: v for k, v in state.items() if "lora_" in k}
-    if not adapter_state:
-        logger.info(
-            "No adapter parameters found! Check your PEFT adapter configuration."
-        )
-    # train model here
-    # get training data
-    # TODO: figure out file paths
-    train_dataset = create_huggingface_dataset(
-        "/home/tlebryk/262_distributed_systems/Distributed-FL/distributed_fl/tests"
-    )
-    print(f"{len(train_dataset)=}")
-    # train model
-    model, metrics = train_model(
-        model,
-        tokenizer,
-        train_dataset,
-    )
-    updated_adapter_state = {}
-    for key, tensor in adapter_state.items():
-        # noise = torch.randn_like(tensor) * 0.001
-        updated_adapter_state[key] = tensor  # + noise
-    payload = serialize_state_dict(updated_adapter_state)
-    compressed_payload = zlib.compress(payload)
-    return compressed_payload
 
 
 class FederatedClient:
@@ -76,13 +50,15 @@ class FederatedClient:
         self.server_address = server_address
         self.current_version = 1
         self.channel = grpc.insecure_channel(server_address)
-        self.stub = model_update_pb2_grpc.FederatedLearningServiceStub(self.channel)
+        self.stub = model_update_pb2_grpc.FederatedLearningServiceStub(
+            self.channel  # , options=CHANNEL_OPTS
+        )
         self.initialize_agent()
         self.running = True
         self.lock = threading.Lock()
 
     def initialize_agent(self, model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct"):
-        adapter_path = os.path.join(PATH_TO_ADAPTERS, "latest")
+        adapter_path = os.path.join(PATH_TO_ADAPTERS, "central", "latest")
         self.agent = LoraHuggingFaceAgent(
             model_name=model_id, adapter_path=adapter_path
         )
@@ -91,7 +67,7 @@ class FederatedClient:
         """Find the latest adapter version on disk"""
 
         # Check if the latest symlink exists and is valid
-        latest_link = os.path.join(PATH_TO_ADAPTERS, "latest")
+        latest_link = os.path.join(PATH_TO_ADAPTERS, "central", "latest")
         if os.path.islink(latest_link) and os.path.exists(
             os.path.realpath(latest_link)
         ):
@@ -213,10 +189,7 @@ class FederatedClient:
             logger.info("Training local model...")
             time.sleep(3)  # Simulate training time
             with self.lock:
-                update_payload = get_adapter_update(
-                    self.agent.model,
-                    self.agent.tokenizer,
-                )
+                update_payload = self.get_adapter_update(self.agent)
                 if mode == "debug":
                     payload_size_bytes = len(update_payload)
                     payload_size_kb = payload_size_bytes / 1024
@@ -248,6 +221,47 @@ class FederatedClient:
             traceback.print_exc()
             return False
 
+    def get_adapter_update(self, agent):
+        """
+        Extract adapter-specific parameters, simulate a local training update by adding
+        small Gaussian noise, and then compress the serialized adapter update.
+        """
+        state = agent.model.state_dict()
+        adapter_state = {k: v for k, v in state.items() if "lora_" in k}
+        if not adapter_state:
+            logger.info(
+                "No adapter parameters found! Check your PEFT adapter configuration."
+            )
+        # train agent.model here
+        # get training data
+        # TODO: figure out file paths
+        train_dataset = create_huggingface_dataset(
+            "/home/tlebryk/262_distributed_systems/Distributed-FL/distributed_fl/tests"
+        )
+        print(f"{len(train_dataset)=}")
+        # train agent.model
+        personal_adapters = os.path.join(PATH_TO_ADAPTERS, "personal")
+        personal_latest_version = self._get_latest_version(personal_adapters)
+        output_dir = os.path.join(personal_adapters, str(personal_latest_version + 1))
+        model_args = ModelArguments(output_dir=output_dir)
+
+        agent.model, metrics = train_model(
+            agent.model,
+            agent.tokenizer,
+            train_dataset,
+            model_args=model_args,
+        )
+        # load adapter.safetensors from output_dir
+        bytes_ = self._read_safetensors_bytes(
+            os.path.join(output_dir, "adapter_model.safetensors")
+        )
+        return bytes_
+
+    @staticmethod
+    def _read_safetensors_bytes(path: str) -> bytes:
+        with open(path, "rb") as f:
+            return f.read()
+
     def run_training_loop(self, interval=10):
         """Main training loop with periodic update submissions."""
         try:
@@ -270,17 +284,36 @@ class FederatedClient:
         if self.channel:
             self.channel.close()
 
-    def _extract_version_from_path(self, path):
-        """Extract version number from adapter path."""
-        # Example path: ./adapters/adapter_1.2.3_r42_20250423
+    @staticmethod
+    def get_version(path: str) -> int:
+        """
+        Extracts the last version number from the given path. If no version is found,
+        returns 0. Version segments are of the form 'v<number>'. The last matching
+        segment in the path is used.
+        """
+        version = 0
+        for segment in path.split("/"):
+            match = re.fullmatch(r"v(\d+)", segment)
+            if match:
+                version = int(match.group(1))
+        return version
+
+    def _get_latest_version(self, dir_path: str) -> int:
+        """
+        Scans the contents of the given directory and returns the highest version
+        number found among its entries, based on 'v<number>' segments.
+        If no versions are found or the directory is invalid, returns 0.
+        """
+        max_version = 0
         try:
-            dirname = os.path.basename(path)
-            parts = dirname.split("_")
-            if len(parts) >= 2 and parts[0] == "adapter":
-                return parts[1]  # Return the version part (1.2.3)
-        except:
-            pass
-        return "0.0.0"  # Default if parsing fails
+            for entry in os.listdir(dir_path):
+                # Only consider the name of the entry for version extraction
+                version = self.get_version(entry)
+                if version > max_version:
+                    max_version = version
+        except (OSError, FileNotFoundError):
+            return 0
+        return max_version
 
     def _get_round_from_path(self, path):
         """Extract round number from adapter path."""
@@ -295,7 +328,7 @@ class FederatedClient:
 
     def save_adapter_to_disk(self, version, create_symlink=True):
         """Save adapter state to disk using the versioning system"""
-        version_dir = os.path.join(PATH_TO_ADAPTERS, f"v{version}")
+        version_dir = os.path.join(PATH_TO_ADAPTERS, "central", f"v{version}")
 
         # Create version directory if it doesn't exist
         os.makedirs(version_dir, exist_ok=True)
@@ -330,7 +363,7 @@ class FederatedClient:
 
         # Update symlink to point to latest version
         if create_symlink:
-            latest_link = os.path.join(PATH_TO_ADAPTERS, "latest")
+            latest_link = os.path.join(PATH_TO_ADAPTERS, "central", "latest")
             if os.path.exists(latest_link):
                 if os.path.islink(latest_link):
                     os.unlink(latest_link)
@@ -347,7 +380,7 @@ class FederatedClient:
         # latest_version = self.find_latest_adapter_version()
         self.agent.model = PeftModel.from_pretrained(
             self.agent.model.get_base_model(),  # Get the original base model without adapters
-            os.path.join(PATH_TO_ADAPTERS, f"latest"),
+            os.path.join(PATH_TO_ADAPTERS, "central", f"latest"),
             is_trainable=False,  # Set as needed
         )
 

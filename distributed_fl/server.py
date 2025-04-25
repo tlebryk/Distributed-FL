@@ -2,7 +2,10 @@
 import io
 import queue
 import threading
+import os
+import tempfile
 import time
+from typing import NamedTuple, Dict, Any
 import zlib
 from concurrent import futures
 
@@ -13,14 +16,39 @@ import torch
 from eval_script import evaluate
 from benchmark import HumanEvalBenchmark
 from agent import LoraHuggingFaceAgent
+from safetensors.torch import load_file
+from logger import get_logger
+from kazoo.client import KazooClient
+
+import model_update_pb2
+import model_update_pb2_grpc
+
+logger = get_logger(__name__)
+
+PATH_TO_ADAPTERS = "./distributed_fl/adapters"
+
+
+# @dataclass
+# class ClientUpdate:
+#     client_id: str
+#     version: int
+#     weight: float
+#     adapter_state: Dict[str, Any]  # your tensor dict
+
+
+class DecodedModelUpdate(NamedTuple):
+    client_id: str
+    update: Dict[str, Any]
+    version: int
+    timestamp: int
 
 
 class FederatedLearningServiceServicer(
     model_update_pb2_grpc.FederatedLearningServiceServicer
 ):
-    def __init__(self, mode="test"):
+    def __init__(self, mode="test", zk_hosts="127.0.0.1:2181"):
         # Store received adapter updates
-        self.updates = []
+        self.update_requests = []
         self.global_adapter_state = None  # Aggregated adapter weights
         self.version = 1
 
@@ -35,6 +63,53 @@ class FederatedLearningServiceServicer(
 
         if mode == "test":
             self.benchmark.dataset = self.benchmark.dataset.select(range(3))
+        self.zk = KazooClient(hosts=zk_hosts)
+        self.zk.start()
+
+    @staticmethod
+    def _load_safetensors_from_bytes(raw: bytes):
+        # save the buffer to a file then read from teh file
+        # def tensors_from_bytes_tmp(raw: bytes):
+        # TODO: make this persistent, save as my client version of this.
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".safetensors") as tmp:
+            tmp.write(raw)
+            tmp_path = tmp.name  # close + flush
+        try:
+            return load_file(tmp_path)  # dict[str, torch.Tensor]
+        finally:
+            os.remove(tmp_path)
+
+    def update_client_weight(self, client_id, weight):
+
+        # 3. Ensure the parent path exists
+        self.zk.ensure_path("/myapp/clients")
+
+        # 4. Create or update a znode for client_id → weight
+        client_id = "client123"
+        weight = 0.42
+
+        path = f"/myapp/clients/{client_id}"
+        data = str(weight).encode("utf-8")
+
+        if self.zk.exists(path):
+            self.zk.set(path, data)
+        else:
+            self.zk.create(path, data, makepath=True)
+
+        print(f"Set {path} = {weight}")
+
+    def get_client_weight(self, client_id):
+
+        path = f"/myapp/clients/{client_id}"
+        weight = 0.5
+        if self.zk.exists(path):
+            raw, stat = self.zk.get(path)
+            weight = float(raw.decode("utf-8"))
+            print(f"Weight for {client_id}: {weight}")
+        else:
+            print(f"No entry for {client_id}")
+
+        return weight
 
     def SubmitUpdate(self, request, context):
         client_id = request.client_id
@@ -48,11 +123,18 @@ class FederatedLearningServiceServicer(
             )
 
         try:
-            # Decompress and deserialize the adapter update
-            decompressed = zlib.decompress(request.update)
-            buffer = io.BytesIO(decompressed)
-            adapter_update = torch.load(buffer)
-            print(
+            client_adapter_path = os.path.join(
+                PATH_TO_ADAPTERS, "clients", client_id, f"v{client_version}"
+            )
+            decoded_dict = self._load_safetensors_from_bytes(request.update)
+            decoded_msg = DecodedModelUpdate(
+                client_id=request.client_id,
+                update=decoded_dict,
+                version=request.version,
+                timestamp=request.timestamp,
+            )
+
+            logger.info(
                 f"Received adapter update from {request.client_id} (version: {request.version})."
             )
 
@@ -61,21 +143,22 @@ class FederatedLearningServiceServicer(
                 self.connected_clients[client_id]["version"] = client_version
                 self.connected_clients[client_id]["last_seen"] = time.time()
 
-            self.updates.append(adapter_update)
+            self.update_requests.append(decoded_msg)
 
             # Aggregate once two or more updates are received (for testing)
             with self.update_lock:
-                if len(self.updates) >= 1:  # 2
+                if len(self.update_requests) >= 1:  # 2
                     aggregated_state = {}
                     # Assume all updates have matching keys
-                    for key in self.updates[0].keys():
+                    for key in self.update_requests[0].update.keys():
                         aggregated_state[key] = sum(
-                            update[key] for update in self.updates
-                        ) / len(self.updates)
+                            update_requests.update[key]
+                            for update_requests in self.update_requests
+                        ) / len(self.update_requests)
                     self.global_adapter_state = aggregated_state
                     self.version += 1
-                    print("Aggregated global adapter state updated.")
-                    self.updates = []  # Reset for the next round
+                    logger.info("Aggregated global adapter state updated.")
+                    self.update_requests = []  # Reset for the next round
 
                     # Notify all subscribed clients of the new model
                     self._notify_clients_of_update()
@@ -84,7 +167,11 @@ class FederatedLearningServiceServicer(
                 success=True, message="Adapter update received."
             )
         except Exception as e:
-            print("Error in SubmitUpdate:", e)
+            # log traceback
+            import traceback
+
+            traceback.print_exc()
+            logger.info("Error in SubmitUpdate:", e)
             return model_update_pb2.Acknowledgement(success=False, message=str(e))
 
     def GetAggregatedModel(self, request, context):
@@ -95,7 +182,7 @@ class FederatedLearningServiceServicer(
             self.connected_clients[client_id]["last_seen"] = time.time()
 
         if self.global_adapter_state is None:
-            print("No aggregated adapter state available yet.")
+            logger.info("No aggregated adapter state available yet.")
             return model_update_pb2.AggregatedModel(
                 model_state=b"", version=self.version
             )
@@ -108,8 +195,9 @@ class FederatedLearningServiceServicer(
 
             code_agent = LoraHuggingFaceAgent(
                 model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
-                adapter_path="./distributed_fl/adapters/latest",
+                adapter_path="./distributed_fl/adapters/central/latest",
             )
+            # TODO: integrate latest adapter...
             result = evaluate(
                 code_agent, self.benchmark, results_csv="experiments.csv", mode="prod"
             )
@@ -117,7 +205,7 @@ class FederatedLearningServiceServicer(
                 torch.save(self.global_adapter_state, buffer)
                 serialized = buffer.getvalue()
                 compressed = zlib.compress(serialized)
-                print(
+                logger.info(
                     f"Sending aggregated adapter state (version: {self.version}) to {request.client_id}."
                 )
 
@@ -132,7 +220,7 @@ class FederatedLearningServiceServicer(
                 context.set_code(grpc.StatusCode.INTERNAL)
                 model_update_pb2.AggregatedModel()
         except Exception as e:
-            print("Error in GetAggregatedModel:", e)
+            logger.info("Error in GetAggregatedModel:", e)
             context.set_details(str(e))
             context.set_code(grpc.StatusCode.INTERNAL)
             return model_update_pb2.AggregatedModel()
@@ -142,7 +230,7 @@ class FederatedLearningServiceServicer(
         client_id = request.client_id
         client_version = request.current_version
 
-        print(f"Client {client_id} connected with version {client_version}")
+        logger.info(f"Client {client_id} connected with version {client_version}")
 
         # Track client connection
         self.connected_clients[client_id] = {
@@ -169,16 +257,18 @@ class FederatedLearningServiceServicer(
                 serialized = buffer.getvalue()
                 compressed = zlib.compress(serialized)
                 response.model_state = compressed
-                print(f"Sent latest model version {self.version} to client {client_id}")
+                logger.info(
+                    f"Sent latest model version {self.version} to client {client_id}"
+                )
             except Exception as e:
-                print(f"Error preparing model for client {client_id}: {e}")
+                logger.info(f"Error preparing model for client {client_id}: {e}")
 
         return response
 
     # New method for update notifications
     def SubscribeToUpdates(self, request, context):
         client_id = request.client_id
-        print(f"Client {client_id} subscribed to update notifications")
+        logger.info(f"Client {client_id} subscribed to update notifications")
 
         # Create a queue for this client if it doesn't exist
         if client_id not in self.notification_queues:
@@ -216,10 +306,10 @@ class FederatedLearningServiceServicer(
                     # Send a ping to check if connection is still active
                     continue
         except Exception as e:
-            print(f"Error in subscription stream for client {client_id}: {e}")
+            logger.info(f"Error in subscription stream for client {client_id}: {e}")
         finally:
             # Clean up when client disconnects
-            print(f"Client {client_id} unsubscribed from updates")
+            logger.info(f"Client {client_id} unsubscribed from updates")
 
     # Helper method to notify clients
     def _notify_clients_of_update(self):
@@ -232,13 +322,13 @@ class FederatedLearningServiceServicer(
             try:
                 # Use put_nowait to avoid blocking if a queue is full
                 self.notification_queues[client_id].put_nowait(notification)
-                print(
+                logger.info(
                     f"Queued notification for client {client_id} about new model version {self.version}"
                 )
             except queue.Full:
-                print(f"Notification queue full for client {client_id}")
+                logger.info(f"Notification queue full for client {client_id}")
             except Exception as e:
-                print(f"Error notifying client {client_id}: {e}")
+                logger.info(f"Error notifying client {client_id}: {e}")
 
 
 def cleanup_disconnected_clients(servicer):
@@ -252,13 +342,13 @@ def cleanup_disconnected_clients(servicer):
             clients_to_remove.append(client_id)
 
     for client_id in clients_to_remove:
-        print(f"Removing inactive client: {client_id}")
+        logger.info(f"Removing inactive client: {client_id}")
         if client_id in servicer.connected_clients:
             del servicer.connected_clients[client_id]
             # Also clean up any notification queues
             if client_id in servicer.notification_queues:
                 del servicer.notification_queues[client_id]
-            print(f"Removed inactive client: {client_id}")
+            logger.info(f"Removed inactive client: {client_id}")
 
 
 def serve():
@@ -269,7 +359,7 @@ def serve():
     )
     server.add_insecure_port("[::]:50051")
     server.start()
-    print("Server started on port 50051.")
+    logger.info("Server started on port 50051.")
 
     # Start a background thread for periodic client cleanup
     def cleanup_thread():
@@ -278,7 +368,7 @@ def serve():
                 cleanup_disconnected_clients(servicer)
                 time.sleep(60)  # Run cleanup every minute
             except Exception as e:
-                print(f"Error in cleanup thread: {e}")
+                logger.info(f"Error in cleanup thread: {e}")
 
     cleanup_task = threading.Thread(target=cleanup_thread, daemon=True)
     cleanup_task.start()
@@ -288,8 +378,10 @@ def serve():
         while True:
             time.sleep(86400)  # Sleep for a day
     except KeyboardInterrupt:
-        print("Server shutting down...")
+        logger.info("Server shutting down...")
         server.stop(0)
+        server.zk.stop()
+        server.zk.close()
 
 
 if __name__ == "__main__":
