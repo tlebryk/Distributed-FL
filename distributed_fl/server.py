@@ -19,6 +19,7 @@ from agent import LoraHuggingFaceAgent
 from safetensors.torch import load_file
 from logger import get_logger
 from kazoo.client import KazooClient
+from utils import find_latest_adapter_version
 
 import model_update_pb2
 import model_update_pb2_grpc
@@ -207,10 +208,10 @@ class FederatedLearningServiceServicer(
             buffer = io.BytesIO()
             # TODO: retry logic
             # implement eval loop and send if good update
-
+            latest_version = find_latest_adapter_version()
             code_agent = LoraHuggingFaceAgent(
                 model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
-                adapter_path="./distributed_fl/adapters/central/latest",
+                adapter_path=f"./distributed_fl/adapters/central/v{latest_version}",
             )
             # TODO: integrate latest adapter...
             result = evaluate(

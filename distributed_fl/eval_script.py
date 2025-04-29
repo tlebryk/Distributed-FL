@@ -1,3 +1,4 @@
+# eval_script.py
 # %%
 import argparse
 import csv
@@ -9,7 +10,6 @@ import pandas as pd
 from agent import LoraHuggingFaceAgent
 from benchmark import HumanEvalBenchmark
 
-# Constants
 
 # --- Persistence helpers ---
 
@@ -88,13 +88,13 @@ def evaluate(
 
     # 2. Setup model & dataset
 
-    model = code_agent.model
-    tokenizer = code_agent.tokenizer
-    # get first three rows of dataset
     # %%
     results = benchmark.run(code_agent.model, code_agent.tokenizer)
     df = pd.DataFrame(results)
     df.success.value_counts()
+    # save df with current timestamp
+    df.to_csv(f"results_{datetime.utcnow().isoformat()}.csv")
+    print(df[["generated_text", "success"]])
 
     current_pct = compute_percent_success(results)
     logging.info(f"Current run percent_success: {current_pct:.2f}%")
@@ -128,8 +128,8 @@ if __name__ == "__main__":
     human_eval = HumanEvalBenchmark()
     code_agent = LoraHuggingFaceAgent(
         model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
-        adapter_path="./distributed_fl/adapters/latest",
+        adapter_path="/home/tlebryk/262_distributed_systems/Distributed-FL/distributed_fl/adapters/personal/1",
     )
     human_eval.load_dataset()
-    human_eval.dataset = human_eval.dataset.select(range(3))
+    human_eval.dataset = human_eval.dataset.select(range(2))
     evaluate(code_agent, human_eval, results_csv=args.results_csv, mode=args.mode)

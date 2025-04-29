@@ -1,10 +1,9 @@
+# python_extractor.py
+import argparse
 import ast
 import sys
 from pathlib import Path
-from pathlib import Path
-import glob
 from datasets import Dataset
-import sys
 
 
 def extract_function_parts(code_str, function_name=None):
@@ -126,19 +125,20 @@ def create_huggingface_dataset(directory_path, pattern="*.py", function_name=Non
         "file_path": file_paths,
     }
     # TODO: change this
-    return Dataset.from_dict(data).select(range(3))
+    return Dataset.from_dict(data)
 
 
 # Example usage
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python extract_functions.py <python_file> [function_name]")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Extract functions from a Python file")
+    parser.add_argument("file_path", help="Path to the Python file")
+    parser.add_argument(
+        "--function_name",
+        help="Name of a specific function to extract (default: all functions)",
+    )
+    args = parser.parse_args()
 
-    file_path = sys.argv[1]
-    specific_function = sys.argv[2] if len(sys.argv) > 2 else None
-
-    functions = extract_from_file(file_path, specific_function)
+    functions = extract_from_file(args.file_path, args.function_name)
 
     for name, (signature, body) in functions.items():
         print(f"Function: {name}")
