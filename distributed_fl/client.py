@@ -243,7 +243,7 @@ class FederatedClient:
         # train agent.model
         personal_adapters = os.path.join(PATH_TO_ADAPTERS, "client", "personal")
         personal_latest_version = self._get_latest_version(personal_adapters)
-        output_dir = os.path.join(personal_adapters, str(personal_latest_version + 1))
+        output_dir = os.path.join(personal_adapters, f"v{personal_latest_version + 1}")
         model_args = ModelArguments(output_dir=output_dir)
 
         agent.model, metrics = train_model(
