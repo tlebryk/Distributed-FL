@@ -300,7 +300,7 @@ class HumanEvalBenchmark(Benchmark):
             "generated_text": generated_text,
             "extracted_function": function_code,
             "imports_code": imports_code,
-            "check_function": check_fn_code,
+            "su" "check_function": check_fn_code,
             "success": success,
             "error_message": msg,
         }

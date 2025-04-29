@@ -1,4 +1,4 @@
-# An example of using standalone Python builds with multistage images.
+# Dockerfile.server
 
 # First, build the application in the `/app` directory
 FROM ghcr.io/astral-sh/uv:bookworm-slim AS builder

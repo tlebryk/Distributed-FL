@@ -1,19 +1,15 @@
-from logger import get_logger
-
-from peft import LoraConfig, get_peft_model, PeftModel
-from python_extractor import create_huggingface_dataset
-from training import LoraArguments, train_model
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
+# agent.py
 import os
-
 from abc import ABC, abstractmethod
+
+import torch
+from logger import get_logger
+from peft import LoraConfig, PeftModel, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logger = get_logger(__name__)
 
-torch.set_num_threads(4)
-
-PATH_TO_ADAPTERS = "./distributed_fl/adapters"
+PATH_TO_ADAPTERS = os.environ.get("PATH_TO_ADAPTERS", "./distributed_fl/adapters")
 
 os.makedirs(PATH_TO_ADAPTERS, exist_ok=True)
 
@@ -88,6 +84,7 @@ class LoraHuggingFaceAgent(CodeGenerationAgent):
         logger.info(
             "Loading Qwen/Qwen2.5-Coder-0.5B-Instruct model and configuring PEFT adapter..."
         )
+        print(f"Loading {model_id} model...")
         # list folders in PATH_TO_ADAPTERS
 
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -95,10 +92,15 @@ class LoraHuggingFaceAgent(CodeGenerationAgent):
             torch_dtype=torch.bfloat16,
             # device_maps="auto",
         )
+        if adapter_config is None:
+            adapter_config = LoraConfig()
+        print(f"{adapter_path=}")
         # TODO: set a default adapter config...
         if adapter_path is None:
+            print("Using adapter config from code")
             self.model = get_peft_model(self.model, adapter_config)
         else:
+            print("Loading adapter from path")
             self.model = PeftModel.from_pretrained(
                 self.model,  # Get the original base model without adapters
                 adapter_path,
@@ -118,12 +120,12 @@ class LoraHuggingFaceAgent(CodeGenerationAgent):
     def load_latest_adapter(self):
         """Load the latest adapter from disk"""
         # Find the latest version
-        # latest_version = self.find_latest_adapter_version()
+        # latest_version = find_latest_adapter_version()
         self.model = PeftModel.from_pretrained(
             self.model.get_base_model(),  # Get the original base model without adapters
             os.path.join(PATH_TO_ADAPTERS, "central", f"latest"),
             is_trainable=False,  # Set as needed
         )
 
-    def convert_to_base_model(self):
+    def _get_base_model(self):
         self.model = self.model.get_base_model()

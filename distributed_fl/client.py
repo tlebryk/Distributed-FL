@@ -4,7 +4,6 @@ import argparse
 import datetime
 import io
 import json
-import logging
 import os
 import re
 import shutil
@@ -17,17 +16,18 @@ import model_update_pb2
 import model_update_pb2_grpc
 import torch
 from logger import get_logger
-from peft import LoraConfig, get_peft_model, PeftModel
+from peft import PeftModel
 from python_extractor import create_huggingface_dataset
-from training import LoraArguments, train_model, ModelArguments
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from training import train_model, ModelArguments
 from agent import LoraHuggingFaceAgent
+from utils import load_safetensors_from_bytes, find_latest_adapter_version
+from safetensors.torch import save_file
 
 logger = get_logger(__name__)
 
 torch.set_num_threads(4)
 
-PATH_TO_ADAPTERS = "./distributed_fl/adapters"
+PATH_TO_ADAPTERS = os.environ.get("PATH_TO_ADAPTERS", "./distributed_fl/adapters")
 
 os.makedirs(PATH_TO_ADAPTERS, exist_ok=True)
 
@@ -57,49 +57,14 @@ class FederatedClient:
         self.running = True
         self.lock = threading.Lock()
 
-    def initialize_agent(self, model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct"):
-        adapter_path = os.path.join(PATH_TO_ADAPTERS, "central", "latest")
+    def initialize_agent(
+        self, model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct", adapter_path=None
+    ):
+        if adapter_path is not None:
+            adapter_path = os.path.join(PATH_TO_ADAPTERS, "central", "latest")
         self.agent = LoraHuggingFaceAgent(
             model_name=model_id, adapter_path=adapter_path
         )
-
-    def find_latest_adapter_version(self):
-        """Find the latest adapter version on disk"""
-
-        # Check if the latest symlink exists and is valid
-        latest_link = os.path.join(PATH_TO_ADAPTERS, "central", "latest")
-        if os.path.islink(latest_link) and os.path.exists(
-            os.path.realpath(latest_link)
-        ):
-            # Read the metadata file to get the version
-            try:
-                with open(os.path.join(latest_link, "metadata.json"), "r") as f:
-                    metadata = json.load(f)
-                    return metadata.get("version", 0)
-            except Exception as e:
-                logger.info(f"Error reading latest adapter metadata: {e}")
-
-        # If no valid symlink, scan all version directories
-        try:
-            version_dirs = [
-                d
-                for d in os.listdir(PATH_TO_ADAPTERS)
-                if d.startswith("v")
-                and os.path.isdir(os.path.join(PATH_TO_ADAPTERS, d))
-            ]
-
-            if not version_dirs:
-                logger.info("No adapter versions found")
-                return 0
-
-            # Extract version numbers and find the max
-            versions = [int(d[1:]) for d in version_dirs if d[1:].isdigit()]
-            if versions:
-                return max(versions)
-            return 0
-        except Exception as e:
-            logger.info(f"Error finding latest adapter version: {e}")
-            return 0
 
     def connect_to_server(self):
         """Establish connection with the server and update model if necessary."""
@@ -169,10 +134,24 @@ class FederatedClient:
             aggregated = self.stub.GetAggregatedModel(client_request)
             if aggregated.model_state:
                 with self.lock:
-                    decompressed = zlib.decompress(aggregated.model_state)
-                    buffer = io.BytesIO(decompressed)
-                    adapter_state = torch.load(buffer)
+                    adapter_state = load_safetensors_from_bytes(aggregated.model_state)
+                    # get latest version
+
+                    # latest = find_latest_adapter_version(PATH_TO_ADAPTERS)
+                    # save_file(
+                    #     adapter_state,
+                    #     os.path.join(
+                    #         PATH_TO_ADAPTERS,
+                    #         f"v{aggregated.version}",
+                    #         "adapter_model.safetensors",
+                    #     ),
+                    # )
+                    # save_adapter_to_disk
+                    # decompressed = zlib.decompress(aggregated.model_state)
+                    # buffer = io.BytesIO(decompressed)
+                    # adapter_state = torch.load(buffer)
                     self.agent.model.load_state_dict(adapter_state, strict=False)
+                    self.save_adapter_to_disk(aggregated.version)
                     self.current_version = aggregated.version
                     logger.info(f"Updated model to version {self.current_version}")
                 return True
@@ -236,7 +215,7 @@ class FederatedClient:
         # get training data
         # TODO: figure out file paths
         train_dataset = create_huggingface_dataset(
-            "/home/tlebryk/262_distributed_systems/Distributed-FL/distributed_fl/tests"
+            "/home/tlebryk/262_distributed_systems/Distributed-FL/data"
         )
         print(f"{len(train_dataset)=}")
         # train agent.model
@@ -251,16 +230,9 @@ class FederatedClient:
             train_dataset,
             model_args=model_args,
         )
-        # load adapter.safetensors from output_dir
-        bytes_ = self._read_safetensors_bytes(
-            os.path.join(output_dir, "adapter_model.safetensors")
-        )
+        with open(os.path.join(output_dir, "adapter_model.safetensors"), "rb") as f:
+            bytes_ = f.read()
         return bytes_
-
-    @staticmethod
-    def _read_safetensors_bytes(path: str) -> bytes:
-        with open(path, "rb") as f:
-            return f.read()
 
     def run_training_loop(self, interval=10):
         """Main training loop with periodic update submissions."""
@@ -334,7 +306,7 @@ class FederatedClient:
         os.makedirs(version_dir, exist_ok=True)
 
         # Save adapter files
-        # adapter_path = os.path.join(version_dir, "adapter.safetensors")
+        # adapter_path = os.path.join(version_dir, "adapter_model.safetensors")
         # buffer = io.BytesIO()
         # torch.save(adapter_state, buffer)
         # with open(adapter_path, "wb") as f:
@@ -377,7 +349,7 @@ class FederatedClient:
     def load_latest_adapter(self):
         """Load the latest adapter from disk"""
         # Find the latest version
-        # latest_version = self.find_latest_adapter_version()
+        # latest_version = find_latest_adapter_version()
         self.agent.model = PeftModel.from_pretrained(
             self.agent.model.get_base_model(),  # Get the original base model without adapters
             os.path.join(PATH_TO_ADAPTERS, "central", f"latest"),

@@ -1,26 +1,15 @@
 # training.py
 from typing import Dict, List, Optional, Union, Any, Tuple, Callable
 import os
-import math
 import torch
-import numpy as np
 from datasets import Dataset
-from transformers import (
-    PreTrainedModel,
-    PreTrainedTokenizer,
-    TrainingArguments,
-    Trainer,
-    DataCollatorForLanguageModeling,
-    DataCollatorWithFlattening,
-)
+from transformers import PreTrainedModel, PreTrainedTokenizer, TrainingArguments
 from peft import (
     LoraConfig,
-    TaskType,
     get_peft_model,
     PeftModel,
-    prepare_model_for_kbit_training,
 )
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from python_extractor import extract_from_file
 
 from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
@@ -101,7 +90,7 @@ class CustomTrainingArguments:
                 "overwrite_output_dir": True,
                 # "evaluation_strategy": "steps" if has_val_dataset else "no",
                 "save_strategy": "steps",
-                "load_best_model_at_end": has_val_dataset,
+                # "load_best_model_at_end": has_val_dataset,
                 "metric_for_best_model": "eval_loss" if has_val_dataset else None,
                 "greater_is_better": False,
             }
@@ -162,10 +151,11 @@ def train_model(
 
     def formatting_prompts_func(example):
         output_texts = []
-        for i in range(len(example["instruction"])):
-            text = f"### Question: {example['instruction'][i]}\n ### Answer: {example['output'][i]}"
-            output_texts.append(text)
-        return output_texts
+        text = (
+            f"### Question: {example['instruction']}\n ### Answer: {example['output']}"
+        )
+        output_texts.append(text)
+        return text
 
     response_template = " ### Answer:"
     response_template_ids = tokenizer.encode(
@@ -178,8 +168,8 @@ def train_model(
         output_dir="./tmp",
         gradient_checkpointing=True,
         num_train_epochs=1,
-        learning_rate=5e-5,
-        warmup_ratio=0.1,
+        learning_rate=5e-4,
+        warmup_ratio=0.05,
         weight_decay=0.01,
         bf16=False,
         fp16=True,
