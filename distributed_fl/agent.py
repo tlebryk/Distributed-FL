@@ -125,6 +125,7 @@ class LoraHuggingFaceAgent(CodeGenerationAgent):
         if adapter_path is None:
             adapter_path = os.path.join(
                 PATH_TO_ADAPTERS,
+                "client",
                 "central",
             )
         latest_version = find_latest_adapter_version(adapter_path=adapter_path)

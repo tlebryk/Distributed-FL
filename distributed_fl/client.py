@@ -9,6 +9,7 @@ import re
 import shutil
 import threading
 import time
+import traceback
 import zlib
 
 import grpc
@@ -48,11 +49,9 @@ class FederatedClient:
     def __init__(self, client_id, server_address="localhost:50051"):
         self.client_id = client_id
         self.server_address = server_address
-        self.current_version = 1
+        self.current_version = 0
         self.channel = grpc.insecure_channel(server_address)
-        self.stub = model_update_pb2_grpc.FederatedLearningServiceStub(
-            self.channel  # , options=CHANNEL_OPTS
-        )
+        self.stub = model_update_pb2_grpc.FederatedLearningServiceStub(self.channel)
         self.initialize_agent()
         self.running = True
         self.lock = threading.Lock()
@@ -62,10 +61,10 @@ class FederatedClient:
     ):
         if adapter_path is not None:
             latest_version = find_latest_adapter_version(
-                os.path.join(PATH_TO_ADAPTERS, "central")
+                os.path.join(PATH_TO_ADAPTERS, "client", "central")
             )
             adapter_path = os.path.join(
-                PATH_TO_ADAPTERS, "central", f"v{latest_version}"
+                PATH_TO_ADAPTERS, "client", "central", f"v{latest_version}"
             )
         self.agent = LoraHuggingFaceAgent(
             model_name=model_id, adapter_path=adapter_path
@@ -91,13 +90,34 @@ class FederatedClient:
                     logger.info(
                         f"Received newer model (version {self.current_version})"
                     )
-                    decompressed = zlib.decompress(version_info.model_state)
-                    buffer = io.BytesIO(decompressed)
-                    adapter_state = torch.load(buffer)
-                    self.agent.model.load_state_dict(adapter_state, strict=False)
+                    decoded_dict = load_safetensors_from_bytes(version_info.model_state)
+                    # save the dict to a safetensors file
+                    path_dir = os.path.join(
+                        PATH_TO_ADAPTERS,
+                        "client",
+                        "central",
+                        f"v{version_info.latest_version}",
+                    )
+                    os.makedirs(path_dir, exist_ok=True)
+                    save_file(
+                        decoded_dict,
+                        os.path.join(
+                            path_dir,
+                            "adapter_model.safetensors",
+                        ),
+                    )
+                    shutil.copy2(
+                        os.path.join(PATH_TO_ADAPTERS, "adapter_config.json"),
+                        os.path.join(
+                            path_dir,
+                            "adapter_config.json",
+                        ),
+                    )
+                    self.agent.model.load_state_dict(decoded_dict, strict=False)
                     logger.info("Updated local model with latest adapter state")
             return True
         except Exception as e:
+            traceback.print_exc()
             logger.info(f"Error connecting to server: {e}")
             return False
 
@@ -138,27 +158,25 @@ class FederatedClient:
             )
             aggregated = self.stub.GetAggregatedModel(client_request)
             if aggregated.model_state:
-                with self.lock:
-                    adapter_state = load_safetensors_from_bytes(aggregated.model_state)
-                    # get latest version
-
-                    # latest = find_latest_adapter_version(PATH_TO_ADAPTERS)
-                    # save_file(
-                    #     adapter_state,
-                    #     os.path.join(
-                    #         PATH_TO_ADAPTERS,
-                    #         f"v{aggregated.version}",
-                    #         "adapter_model.safetensors",
-                    #     ),
-                    # )
-                    # save_adapter_to_disk
-                    # decompressed = zlib.decompress(aggregated.model_state)
-                    # buffer = io.BytesIO(decompressed)
-                    # adapter_state = torch.load(buffer)
-                    self.agent.model.load_state_dict(adapter_state, strict=False)
-                    self.save_adapter_to_disk(aggregated.version)
-                    self.current_version = aggregated.version
-                    logger.info(f"Updated model to version {self.current_version}")
+                logger.info(
+                    f"Received model state of length {len(aggregated.model_state)}"
+                )
+                logger.info("Successfully loaded adapter state")
+                adapter_state = load_safetensors_from_bytes(aggregated.model_state)
+                self.agent.model.load_state_dict(adapter_state, strict=False)
+                logger.info("Successfully loaded adapter state into model")
+                version_dir = os.path.join(
+                    PATH_TO_ADAPTERS, "client", "central", f"v{aggregated.version}"
+                )
+                os.makedirs(version_dir, exist_ok=True)
+                logger.info(f"Saving adapter state to {version_dir}")
+                self.save_adapter_to_disk(version_dir, aggregated.version)
+                shutil.copy2(
+                    os.path.join(PATH_TO_ADAPTERS, "adapter_config.json"),
+                    os.path.join(version_dir, "adapter_config.json"),
+                )
+                self.current_version = aggregated.version
+                logger.info(f"Updated model to version {self.current_version}")
                 return True
             else:
                 logger.info("No model state received or no newer model available")
@@ -171,7 +189,6 @@ class FederatedClient:
         """Simulate training and submit local update to the server."""
         try:
             logger.info("Training local model...")
-            time.sleep(3)  # Simulate training time
             with self.lock:
                 update_payload = self.get_adapter_update(self.agent)
                 if mode == "debug":
@@ -183,21 +200,21 @@ class FederatedClient:
                     )
 
                 current_ver = self.current_version
-            update_message = model_update_pb2.ModelUpdate(
-                client_id=self.client_id,
-                update=update_payload,
-                version=current_ver,
-                timestamp=int(time.time()),
-            )
-            logger.info(f"Submitting update to server (version: {current_ver})...")
-            ack = self.stub.SubmitUpdate(update_message)
-            logger.info(f"SubmitUpdate result: {ack.message}")
+                update_message = model_update_pb2.ModelUpdate(
+                    client_id=self.client_id,
+                    update=update_payload,
+                    version=current_ver,
+                    timestamp=int(time.time()),
+                )
+                logger.info(f"Submitting update to server (version: {current_ver})...")
+                ack = self.stub.SubmitUpdate(update_message)
+                logger.info(f"SubmitUpdate result: {ack.message}")
 
-            if not ack.success and "outdated model" in ack.message:
-                logger.info("Server rejected update due to outdated model.")
-                self.get_latest_model()
-                return False
-            return ack.success
+                if not ack.success and "outdated model" in ack.message:
+                    logger.info("Server rejected update due to outdated model.")
+                    self.get_latest_model()
+                    return False
+                return ack.success
         except Exception as e:
             import traceback
 
@@ -224,7 +241,7 @@ class FederatedClient:
         )
         print(f"{len(train_dataset)=}")
         # train agent.model
-        personal_adapters = os.path.join(PATH_TO_ADAPTERS, "personal")
+        personal_adapters = os.path.join(PATH_TO_ADAPTERS, "client", "personal")
         personal_latest_version = self._get_latest_version(personal_adapters)
         output_dir = os.path.join(personal_adapters, str(personal_latest_version + 1))
         model_args = ModelArguments(output_dir=output_dir)
@@ -303,19 +320,9 @@ class FederatedClient:
             pass
         return 0  # Default if parsing fails
 
-    def save_adapter_to_disk(self, version, create_symlink=True):
+    def save_adapter_to_disk(self, version_dir, version, create_symlink=True):
         """Save adapter state to disk using the versioning system"""
-        version_dir = os.path.join(PATH_TO_ADAPTERS, "central", f"v{version}")
 
-        # Create version directory if it doesn't exist
-        os.makedirs(version_dir, exist_ok=True)
-
-        # Save adapter files
-        # adapter_path = os.path.join(version_dir, "adapter_model.safetensors")
-        # buffer = io.BytesIO()
-        # torch.save(adapter_state, buffer)
-        # with open(adapter_path, "wb") as f:
-        #     f.write(buffer.getvalue())
         self.agent.model.save_pretrained(version_dir)
 
         # Create metadata file
@@ -340,7 +347,8 @@ class FederatedClient:
 
         # Update symlink to point to latest version
         if create_symlink:
-            latest_link = os.path.join(PATH_TO_ADAPTERS, "central", "latest")
+
+            latest_link = os.path.join(PATH_TO_ADAPTERS, "client", "central", "latest")
             if os.path.exists(latest_link):
                 if os.path.islink(latest_link):
                     os.unlink(latest_link)
