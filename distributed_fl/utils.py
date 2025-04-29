@@ -23,15 +23,15 @@ def find_latest_adapter_version(path_to_adapters):
     """Find the latest adapter version on disk"""
 
     # Check if the latest symlink exists and is valid
-    latest_link = os.path.join(path_to_adapters, "latest")
-    if os.path.islink(latest_link) and os.path.exists(os.path.realpath(latest_link)):
-        # Read the metadata file to get the version
-        try:
-            with open(os.path.join(latest_link, "metadata.json"), "r") as f:
-                metadata = json.load(f)
-                return metadata.get("version", 0)
-        except Exception as e:
-            logging.info(f"Error reading latest adapter metadata: {e}")
+    # latest_link = os.path.join(path_to_adapters, "latest")
+    # if os.path.islink(latest_link) and os.path.exists(os.path.realpath(latest_link)):
+    #     # Read the metadata file to get the version
+    #     try:
+    #         with open(os.path.join(latest_link, "metadata.json"), "r") as f:
+    #             metadata = json.load(f)
+    #             return metadata.get("version", 0)
+    #     except Exception as e:
+    #         logging.info(f"Error reading latest adapter metadata: {e}")
 
     # If no valid symlink, scan all version directories
     try:

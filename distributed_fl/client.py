@@ -346,15 +346,15 @@ class FederatedClient:
         #         json.dump({}, f)
 
         # Update symlink to point to latest version
-        if create_symlink:
+        # if create_symlink:
 
-            latest_link = os.path.join(PATH_TO_ADAPTERS, "client", "central", "latest")
-            if os.path.exists(latest_link):
-                if os.path.islink(latest_link):
-                    os.unlink(latest_link)
-                else:
-                    shutil.rmtree(latest_link)
-            os.symlink(f"v{version}", latest_link, target_is_directory=True)
+        #     latest_link = os.path.join(PATH_TO_ADAPTERS, "client", "central", "latest")
+        #     if os.path.exists(latest_link):
+        #         if os.path.islink(latest_link):
+        #             os.unlink(latest_link)
+        #         else:
+        #             shutil.rmtree(latest_link)
+        #     os.symlink(f"v{version}", latest_link, target_is_directory=True)
 
         logger.info(f"Saved adapter version {version} to {version_dir}")
         return version_dir
