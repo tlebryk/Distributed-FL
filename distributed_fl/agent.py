@@ -6,6 +6,8 @@ import torch
 from logger import get_logger
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from utils import find_latest_adapter_version
+
 
 logger = get_logger(__name__)
 
@@ -117,13 +119,20 @@ class LoraHuggingFaceAgent(CodeGenerationAgent):
             self.tokenizer.pad_token = self.tokenizer.eos_token
         logger.info("Tokenizer loaded.")
 
-    def load_latest_adapter(self):
+    def load_latest_adapter(self, adapter_path=None):
         """Load the latest adapter from disk"""
         # Find the latest version
-        # latest_version = find_latest_adapter_version()
+        if adapter_path is None:
+            adapter_path = os.path.join(
+                PATH_TO_ADAPTERS,
+                "central",
+            )
+        latest_version = find_latest_adapter_version(adapter_path=adapter_path)
+        full_adapter_path = os.path.join(adapter_path, f"v{latest_version}")
+
         self.model = PeftModel.from_pretrained(
             self.model.get_base_model(),  # Get the original base model without adapters
-            os.path.join(PATH_TO_ADAPTERS, "central", f"latest"),
+            os.path.join(full_adapter_path),
             is_trainable=False,  # Set as needed
         )
 

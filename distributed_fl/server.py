@@ -1,46 +1,42 @@
 # server.py
 import io
-import queue
-import threading
 import os
+import queue
+import socket
 import tempfile
+import threading
 import time
-import socket  # ← NEW
-from typing import NamedTuple, Dict, Any
-import zlib
-import json
-from concurrent import futures
 import traceback
+import zlib
+from concurrent import futures
+from typing import Any, Dict, NamedTuple
 
 import grpc
 import torch
-from eval_script import evaluate
-from benchmark import HumanEvalBenchmark
-from agent import LoraHuggingFaceAgent
-from safetensors.torch import load_file
-from logger import get_logger
 from kazoo.client import KazooClient
+from kazoo.exceptions import NodeExistsError
 from kazoo.retry import KazooRetry
-from kazoo.exceptions import NoNodeError  # ← NEW
-from peft import PeftModel, PeftConfig
+from kazoo.recipe.watchers import DataWatch, ChildrenWatch
+from safetensors.torch import load_file, save_file
+from peft import PeftConfig
 
 import model_update_pb2
 import model_update_pb2_grpc
-from safetensors.torch import save_file
-
-from utils import load_safetensors_from_bytes
+from agent import LoraHuggingFaceAgent
+from benchmark import HumanEvalBenchmark
+from eval_script import evaluate
+from logger import get_logger
+from utils import load_safetensors_from_bytes, find_latest_adapter_version
 
 logger = get_logger(__name__)
 
 PATH_TO_ADAPTERS = os.environ.get("PATH_TO_ADAPTERS", "./distributed_fl/adapters")
 
-# ---------------------------------------------------------------------------
-# Leader / replica constants  (NEW)
-# ---------------------------------------------------------------------------
-LEADER_ELECTION_ROOT = "/fl/servers"  # parent path for election znodes
-META_VERSION_ZNODE = "/fl/meta/version"  # current aggregated version
-SYNC_POLL_SEC = 3  # replica polling cadence (seconds)
-# ---------------------------------------------------------------------------
+# ---- Zookeeper paths ---------------------------------------------------------
+ZK_ELECTION_PATH = "/fl/servers"
+ZK_VERSION_PATH = "/fl/meta/version"
+ZK_LEADER_INFO_PATH = "/fl/meta/leader"
+# -----------------------------------------------------------------------------
 
 
 class DecodedModelUpdate(NamedTuple):
@@ -50,195 +46,166 @@ class DecodedModelUpdate(NamedTuple):
     timestamp: int
 
 
+# -----------------------------------------------------------------------------
+# Federated learning service
+# -----------------------------------------------------------------------------
 class FederatedLearningServiceServicer(
     model_update_pb2_grpc.FederatedLearningServiceServicer
 ):
-    def __init__(self, mode="test", zk_hosts="127.0.0.1:2181"):
-        # Store received adapter updates
-        self.update_requests = []
-        self.global_adapter_state = None  # Aggregated adapter weights
-        self.version = 1
+    # -------------------------------------------------------------------------
+    # Initialisation
+    # -------------------------------------------------------------------------
+    def __init__(
+        self,
+        mode: str = "test",
+        zk_hosts: str = "127.0.0.1:2181",
+        host: str | None = None,
+    ):
+        # -------------------- in-memory state --------------------------------
+        self.update_requests: list[DecodedModelUpdate] = []
+        self.global_adapter_state: Dict[str, Any] | None = None
+        self.version: int = 1
 
-        # New attributes for hybrid approach
-        self.connected_clients = {}  # {client_id: {version, last_seen}}
-        self.update_lock = threading.Lock()  # For thread safety
+        self.connected_clients: Dict[str, Dict[str, Any]] = {}
+        self.notification_queues: Dict[
+            str, "queue.Queue[model_update_pb2.UpdateNotification]"
+        ] = {}  # noqa: E501
 
-        # Map of client_id to notification queues for update streaming
-        self.notification_queues = {}  # {client_id: Queue()}
+        self.update_lock = threading.Lock()
+        self.is_leader = False
+        self.host = host or socket.gethostname()
+
+        # -------------------- benchmarking -----------------------------------
         self.benchmark = HumanEvalBenchmark()
         self.benchmark.load_dataset()
-
         if mode == "test":
             self.benchmark.dataset = self.benchmark.dataset.select(range(3))
 
-        self.host = socket.gethostname()  # ← NEW
-        self.is_leader = False  # ← NEW
+        # -------------------- Zookeeper connection & election ----------------
+        self._init_zookeeper(zk_hosts)
 
-        # Connect to ZooKeeper (existing logic)
-        try:
-            print(f"trying to connect to {zk_hosts}")
-            retry = KazooRetry(
-                max_tries=1,
-                delay=1.0,
-                backoff=2,
-                max_delay=1,
-            )
-            self.zk = KazooClient(
-                hosts=zk_hosts,
-                command_retry=retry,
-                connection_retry=retry,
-            )
-            self.zk.start()
-            logger.info(f"Connected to Zookeeper at {zk_hosts}")
-        except Exception:
-            self.zk = None
+        # -------------------- replica sync watch -----------------------------
+        self._install_version_watch()
 
-        # -------------------------------------------------------------------
-        # Leader / replica initialisation (NEW)
-        # -------------------------------------------------------------------
-        if self.zk is not None:
-            self._elect_leader()
-            self._load_version()
-            if not self.is_leader:
-                threading.Thread(target=self._replica_sync_loop, daemon=True).start()
-        # -------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # Leader / replica helpers  (NEW)
-    # -----------------------------------------------------------------------
-    def _elect_leader(self):
-        """Create an ephemeral-sequential znode and determine our role."""
-        self.zk.ensure_path(LEADER_ELECTION_ROOT)
-        self.my_znode = self.zk.create(
-            f"{LEADER_ELECTION_ROOT}/n_",
-            value=self.host.encode(),
-            ephemeral=True,
-            sequence=True,
+    # -------------------------------------------------------------------------
+    # Zookeeper helpers
+    # -------------------------------------------------------------------------
+    def _init_zookeeper(self, zk_hosts: str) -> None:
+        retry = KazooRetry(max_tries=1, delay=1.0, backoff=2, max_delay=1)
+        self.zk = KazooClient(
+            hosts=zk_hosts,
+            connection_retry=retry,
+            command_retry=retry,
         )
-        self._refresh_role()  # sets self.is_leader and installs watch
+        self.zk.start()
+        logger.info(f"Connected to Zookeeper at {zk_hosts}")
 
-    def _refresh_role(self, *_):
-        """Callback when watched znode disappears → recalc leader."""
-        children = sorted(self.zk.get_children(LEADER_ELECTION_ROOT))
-        my_node = self.my_znode.split("/")[-1]
-        self.is_leader = children and my_node == children[0]
+        # Ensure base znodes exist
+        for path in (ZK_ELECTION_PATH, "/fl/meta", "/fl/clients"):
+            self.zk.ensure_path(path)
 
-        if not self.is_leader and children:
-            idx = children.index(my_node)
-            watch_target = f"{LEADER_ELECTION_ROOT}/{children[idx - 1]}"
-            self.zk.exists(watch_target, watch=self._refresh_role)
+        # Start leader election in a background thread
+        threading.Thread(target=self._participate_in_election, daemon=True).start()
 
-    def _get_leader_host(self) -> str:
-        """Return hostname stored in leader’s znode."""
+    # -------------------------------------------------------------------------
+    # Leader election
+    # -------------------------------------------------------------------------
+    def _participate_in_election(self) -> None:
+        """
+        Blocks until this process becomes leader, then keeps the role while the
+        ephemeral node exists. When we lose the session the thread exits and
+        another server takes over.
+        """
+        election = self.zk.Election(ZK_ELECTION_PATH, self.host)
+
+        def _on_elected() -> None:
+            self.is_leader = True
+            logger.info("🏆  Became leader (%s)", self.host)
+            # Advertise leader host for replicas/clients
+            self.zk.set(ZK_LEADER_INFO_PATH, self.host.encode("utf-8"), version=-1)
+            # Persist version if not present, or load existing
+            if self.zk.exists(ZK_VERSION_PATH):
+                self._load_version()
+            else:
+                self._persist_version()
+
+        election.run(_on_elected)
+
+    def _persist_version(self) -> None:
+        data = str(self.version).encode()
+        if self.zk.exists(ZK_VERSION_PATH):
+            self.zk.set(ZK_VERSION_PATH, data)
+        else:
+            self.zk.create(ZK_VERSION_PATH, data, makepath=True)
+
+    def _load_version(self) -> None:
+        data, _ = self.zk.get(ZK_VERSION_PATH)
+        self.version = int(data.decode())
+        logger.info("Loaded version %s from ZooKeeper", self.version)
+        self._load_adapter_from_disk(self.version)
+
+    def _get_current_leader_host(self) -> str | None:
+        if not self.zk.exists(ZK_LEADER_INFO_PATH):
+            return None
+        data, _ = self.zk.get(ZK_LEADER_INFO_PATH)
+        return data.decode() if data else None
+
+    # -------------------------------------------------------------------------
+    # Replica sync
+    # -------------------------------------------------------------------------
+    def _install_version_watch(self) -> None:
+        @DataWatch(self.zk, ZK_VERSION_PATH)
+        def _watch(data, _stat, _event) -> None:  # noqa: N803 (kazoo naming)
+            # This fires both on initial set and on every change
+            if data is None:
+                return
+            new_version = int(data.decode())
+            if new_version > self.version:
+                logger.info("Replica detected new version %s → loading", new_version)
+                self.version = new_version
+                self._load_adapter_from_disk(new_version)
+
+    def _load_adapter_from_disk(self, version: int) -> None:
         try:
-            children = sorted(self.zk.get_children(LEADER_ELECTION_ROOT))
-            leader_node = f"{LEADER_ELECTION_ROOT}/{children[0]}"
-            data, _ = self.zk.get(leader_node)
-            return data.decode()
-        except Exception:
-            return ""
-
-    def _persist_version(self):
-        """Write current version to ZooKeeper so replicas can catch up."""
-        try:
-            self.zk.ensure_path(META_VERSION_ZNODE)
-            self.zk.set(META_VERSION_ZNODE, str(self.version).encode())
+            adapter_path = os.path.join(
+                PATH_TO_ADAPTERS, "rounds", f"v{version}", "adapter_model.safetensors"
+            )
+            if not os.path.exists(adapter_path):
+                logger.warning("Adapter v%s not found on disk yet", version)
+                return
+            self.global_adapter_state = load_file(adapter_path)
+            logger.info("Loaded aggregated adapter v%s into memory", version)
         except Exception as e:
-            logger.warning(f"Persist version failed: {e}")
+            logger.error("Failed to load adapter v%s: %s", version, e, exc_info=True)
 
-    def _load_version(self):
-        """Load persisted version at startup (if any)."""
-        try:
-            data, _ = self.zk.get(META_VERSION_ZNODE)
-            self.version = int(data.decode())
-        except NoNodeError:
-            # First boot: nothing persisted yet.
-            pass
+    # -------------------------------------------------------------------------
+    # RPC utilities
+    # -------------------------------------------------------------------------
+    def _redirect_to_leader_ack(
+        self, prefix: str = ""
+    ) -> model_update_pb2.Acknowledgement:
+        host = self._get_current_leader_host()
+        msg = f"{prefix} REDIRECT:{host}" if host else f"{prefix} NO_LEADER_AVAILABLE"
+        return model_update_pb2.Acknowledgement(success=False, message=msg)
 
-    def _replica_sync_loop(self):
-        """Background loop for replicas to pull latest state."""
-        while True:
-            try:
-                data, _ = self.zk.get(META_VERSION_ZNODE)
-                latest = int(data.decode())
-                if latest > self.version:
-                    self.version = latest
-                    adapter_dir = os.path.join(
-                        PATH_TO_ADAPTERS, "rounds", f"v{self.version}"
-                    )
-                    path = os.path.join(adapter_dir, "adapter_model.safetensors")
-                    if os.path.exists(path):
-                        with open(path, "rb") as fh:
-                            self.global_adapter_state = load_safetensors_from_bytes(
-                                fh.read()
-                            )
-            except Exception as e:
-                import traceback
-
-                traceback.print_exc()
-                logger.warning(f"Replica sync error: {e}")
-            time.sleep(SYNC_POLL_SEC)
-
-    # -----------------------------------------------------------------------
-
-    def update_client_weight(self, client_id, weight):
-
-        # 3. Ensure the parent path exists
-        if self.zk is None:
-            return
-
-        self.zk.ensure_path("/myapp/clients")
-
-        # 4. Create or update a znode for client_id → weight
-        path = f"/myapp/clients/{client_id}"
-        data = str(weight).encode("utf-8")
-
-        if self.zk.exists(path):
-            self.zk.set(path, data)
-        else:
-            self.zk.create(path, data, makepath=True)
-
-        print(f"Set {path} = {weight}")
-
-    def get_client_weight(self, client_id):
-
-        path = f"/myapp/clients/{client_id}"
-        weight = 0.5
-        if self.zk is not None and self.zk.exists(path):
-            raw, stat = self.zk.get(path)
-            weight = float(raw.decode("utf-8"))
-            logger.debug(f"Weight for {client_id}: {weight}")
-        else:
-            logger.debug(f"No entry for {client_id}")
-
-        return weight
-
-    # -----------------------------------------------------------------------
-    # RPCs
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # RPC implementations
+    # -------------------------------------------------------------------------
     def SubmitUpdate(self, request, context):
-        # ---------------- leader-only gate ----------------
-        if self.zk is not None and not self.is_leader:
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details("Not leader")
-            context.set_trailing_metadata((("leader-host", self._get_leader_host()),))
-            return model_update_pb2.Acknowledgement()
-        # --------------------------------------------------
+        # Only the leader mutates global state
+        if not self.is_leader:
+            return self._redirect_to_leader_ack("Not leader:")
 
         client_id = request.client_id
         client_version = request.version
 
-        # Check if client is submitting an update with outdated version
         if self.global_adapter_state is not None and client_version < self.version:
             return model_update_pb2.Acknowledgement(
                 success=False,
-                message=f"Client has outdated model (client: {client_version}, latest: {self.version})",
+                message=f"Client outdated (client v{client_version}, latest v{self.version})",
             )
 
         try:
-            client_adapter_path = os.path.join(
-                PATH_TO_ADAPTERS, "clients", client_id, f"v{client_version}"
-            )
             decoded_dict = load_safetensors_from_bytes(request.update)
             decoded_msg = DecodedModelUpdate(
                 client_id=request.client_id,
@@ -246,97 +213,72 @@ class FederatedLearningServiceServicer(
                 version=request.version,
                 timestamp=request.timestamp,
             )
+            logger.info("Received update from %s (v%s)", client_id, client_version)
 
-            logger.info(
-                f"Received adapter update from {request.client_id} (version: {request.version})."
-            )
-
-            # Update the client's tracked version
             if client_id in self.connected_clients:
                 self.connected_clients[client_id]["version"] = client_version
                 self.connected_clients[client_id]["last_seen"] = time.time()
 
             self.update_requests.append(decoded_msg)
 
-            # Aggregate once two or more updates are received (for testing)
+            # ------------------------------------------------ aggregation block
             with self.update_lock:
-                if len(self.update_requests) >= 1:  # 2
+                if len(self.update_requests) >= 1:  # ⇐ use 2+ in prod
                     self.version += 1
+                    aggregated_state: Dict[str, Any] = {}
+                    total_weights: Dict[str, float] = {}
 
-                    aggregated_state = {}
-                    # Assume all updates have matching keys
-                    for key in self.update_requests[0].update.keys():
-                        aggregated_state[key] = 0
-                        total_weight = 0
-                        for update_requests in self.update_requests:
-                            # allow some zk tolerance
-                            if self.zk is not None:
-                                weight = self.get_client_weight(
-                                    update_requests.client_id
-                                )
-                            else:
-                                weight = 1
-                            aggregated_state[key] += (
-                                update_requests.update[key] * weight
-                            )
-                            total_weight += weight
+                    for update in self.update_requests:
+                        weight = self._get_client_weight(update.client_id)
+                        for k, v in update.update.items():
+                            aggregated_state.setdefault(k, 0.0)
+                            total_weights.setdefault(k, 0.0)
+                            aggregated_state[k] += v * weight
+                            total_weights[k] += weight
 
-                        aggregated_state[key] /= total_weight
+                    for k in aggregated_state:
+                        aggregated_state[k] /= total_weights[k]
 
                     self.global_adapter_state = aggregated_state
-                    adapter_folder = os.path.join(
-                        PATH_TO_ADAPTERS, "rounds", f"v{self.version}"
-                    )
-                    os.makedirs(adapter_folder, exist_ok=True)
-                    # TODO: Figure out adapter_config.json. For now let's cheat
-                    model_path = os.path.join(
-                        PATH_TO_ADAPTERS, "central", "latest"
-                    )  # distributed_fl/adapters/central/latest
-                    config = PeftConfig.from_pretrained(model_path)
-                    # save adapter.config_json
-                    config.save_pretrained(adapter_folder)
+                    self._store_new_adapter()
 
-                    save_file(
-                        aggregated_state,
-                        os.path.join(adapter_folder, "adapter_model.safetensors"),
-                    )
+                    logger.info("Aggregated adapter v%s ready", self.version)
+                    self.update_requests.clear()
 
-                    logger.info("Aggregated global adapter state updated.")
-                    self.update_requests = []  # Reset for the next round
-
-                    # NEW: persist version for replicas
-                    if self.zk is not None:
-                        self._persist_version()
-
-                    # Notify all subscribed clients of the new model
+                    # Persist and notify
+                    self._persist_version()
                     self._notify_clients_of_update()
 
-            return model_update_pb2.Acknowledgement(
-                success=True, message="Adapter update received."
-            )
+            return model_update_pb2.Acknowledgement(success=True, message="ok")
         except Exception as e:
-            traceback.print_exc()
-            logger.info("Error in SubmitUpdate: %s", e)
+            logger.error("SubmitUpdate failed: %s", e, exc_info=True)
             return model_update_pb2.Acknowledgement(success=False, message=str(e))
+
+    def _store_new_adapter(self) -> None:
+        adapter_folder = os.path.join(PATH_TO_ADAPTERS, "rounds", f"v{self.version}")
+        os.makedirs(adapter_folder, exist_ok=True)
+        latest_version = find_latest_adapter_version(
+            os.path.join(PATH_TO_ADAPTERS, "central")
+        )
+        model_path = os.path.join(PATH_TO_ADAPTERS, "central", f"v{latest_version}")
+        config = PeftConfig.from_pretrained(model_path)
+        config.save_pretrained(adapter_folder)
+        save_file(
+            self.global_adapter_state,
+            os.path.join(adapter_folder, "adapter_model.safetensors"),
+        )
 
     def GetAggregatedModel(self, request, context):
         client_id = request.client_id
-
-        # Update client's last seen timestamp
         if client_id in self.connected_clients:
             self.connected_clients[client_id]["last_seen"] = time.time()
 
         if self.global_adapter_state is None:
-            logger.info("No aggregated adapter state available yet.")
             return model_update_pb2.AggregatedModel(
                 model_state=b"", version=self.version
             )
 
         try:
-            # Serialize and compress the aggregated adapter state
-            buffer = io.BytesIO()
-            # TODO: retry logic
-            # implement eval loop and send if good update
             adapter_file_path = os.path.join(
                 PATH_TO_ADAPTERS, "rounds", f"v{self.version}"
             )
@@ -348,22 +290,21 @@ class FederatedLearningServiceServicer(
                 code_agent, self.benchmark, results_csv="experiments.csv", mode="prod"
             )
             if result:
-                path = os.path.join(adapter_file_path, "adapter_model.safetensors")
-                with open(path, "rb") as f:
+                with open(
+                    os.path.join(adapter_file_path, "adapter_model.safetensors"), "rb"
+                ) as f:
                     bytes_ = f.read()
-                # Update client's tracked version
                 if client_id in self.connected_clients:
                     self.connected_clients[client_id]["version"] = self.version
                 return model_update_pb2.AggregatedModel(
                     model_state=bytes_, version=self.version
                 )
-            else:
-                context.set_details("Bad update")
-                context.set_code(grpc.StatusCode.INTERNAL)
-                model_update_pb2.AggregatedModel()
+
+            context.set_details("Bad update")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            return model_update_pb2.AggregatedModel()
         except Exception as e:
-            traceback.print_exc()
-            logger.info("Error in GetAggregatedModel:: %s", e)
+            logger.error("GetAggregatedModel failed: %s", e, exc_info=True)
             context.set_details(str(e))
             context.set_code(grpc.StatusCode.INTERNAL)
             return model_update_pb2.AggregatedModel()
@@ -371,152 +312,134 @@ class FederatedLearningServiceServicer(
     def ConnectClient(self, request, context):
         client_id = request.client_id
         client_version = request.current_version
-
-        logger.info(f"Client {client_id} connected with version {client_version}")
-
-        # Track client connection
         self.connected_clients[client_id] = {
             "version": client_version,
             "last_seen": time.time(),
             "ready_for_training": request.ready_for_training,
         }
 
-        # Check if client needs an update
         update_available = (
             self.global_adapter_state is not None and client_version < self.version
         )
-
         response = model_update_pb2.ModelVersionInfo(
             update_available=update_available, latest_version=self.version
         )
 
-        # Automatically send model if update is available
         if update_available:
             try:
-                buffer = io.BytesIO()
-                torch.save(self.global_adapter_state, buffer)
-                serialized = buffer.getvalue()
-                compressed = zlib.compress(serialized)
-                response.model_state = compressed
-                logger.info(
-                    f"Sent latest model version {self.version} to client {client_id}"
+                adapter_path = os.path.join(
+                    PATH_TO_ADAPTERS,
+                    "rounds",
+                    f"v{self.version}",
+                    "adapter_model.safetensors",
                 )
+                with open(adapter_path, "rb") as f:
+                    response.model_state = f.read()
             except Exception as e:
-                logger.info(f"Error preparing model for client {client_id}: {e}")
+                logger.error("Prepare model for client %s failed: %s", client_id, e)
 
         return response
 
     def SubscribeToUpdates(self, request, context):
         client_id = request.client_id
-        logger.info(f"Client {client_id} subscribed to update notifications")
-
-        # Create a queue for this client if it doesn't exist
-        if client_id not in self.notification_queues:
-            self.notification_queues[client_id] = queue.Queue()
-
-        # Update client's last seen timestamp
-        if client_id in self.connected_clients:
-            self.connected_clients[client_id]["last_seen"] = time.time()
-        else:
-            self.connected_clients[client_id] = {
+        self.notification_queues.setdefault(client_id, queue.Queue())
+        self.connected_clients.setdefault(
+            client_id,
+            {
                 "version": request.current_version,
                 "last_seen": time.time(),
-            }
-
-        # Send initial notification if needed
+            },
+        )
         if self.global_adapter_state is not None:
             yield model_update_pb2.UpdateNotification(
                 new_version=self.version, update_type="FULL"
             )
 
-        # Process notifications from the queue
         try:
             while context.is_active():
                 try:
-                    notification = self.notification_queues[client_id].get(
+                    note = self.notification_queues[client_id].get(
                         block=True, timeout=30
                     )
-                    yield notification
-                    self.notification_queues[client_id].task_done()
+                    yield note
                 except queue.Empty:
                     if client_id in self.connected_clients:
                         self.connected_clients[client_id]["last_seen"] = time.time()
                     continue
-        except Exception as e:
-            logger.info(f"Error in subscription stream for client {client_id}: {e}")
         finally:
-            logger.info(f"Client {client_id} unsubscribed from updates")
+            logger.info("Client %s unsubscribed", client_id)
 
-    # Helper method to notify clients
-    def _notify_clients_of_update(self):
-        notification = model_update_pb2.UpdateNotification(
+    # -------------------------------------------------------------------------
+    # Internal helpers
+    # -------------------------------------------------------------------------
+    def _notify_clients_of_update(self) -> None:
+        note = model_update_pb2.UpdateNotification(
             new_version=self.version, update_type="FULL"
         )
-
-        for client_id in list(self.notification_queues.keys()):
+        for cid, q in self.notification_queues.items():
             try:
-                self.notification_queues[client_id].put_nowait(notification)
-                logger.info(
-                    f"Queued notification for client {client_id} about new model version {self.version}"
-                )
+                q.put_nowait(note)
             except queue.Full:
-                logger.info(f"Notification queue full for client {client_id}")
-            except Exception as e:
-                logger.info(f"Error notifying client {client_id}: {e}")
+                logger.warning("Notification queue full for %s", cid)
+
+    def _get_client_weight(self, client_id: str) -> float:
+        zk_path = f"/fl/clients/{client_id}"
+        if self.zk.exists(zk_path):
+            data, _ = self.zk.get(zk_path)
+            return float(data.decode())
+        return 1.0  # default
+
+    # -------------------------------------------------------------------------
+    # Cleanup inactive clients (runs in background thread from serve())
+    # -------------------------------------------------------------------------
+    def cleanup_disconnected_clients(self) -> None:
+        now = time.time()
+        timeout = 300
+        stale = [
+            cid
+            for cid, info in self.connected_clients.items()
+            if now - info.get("last_seen", 0) > timeout
+        ]
+        for cid in stale:
+            logger.info("Removing inactive client %s", cid)
+            self.connected_clients.pop(cid, None)
+            self.notification_queues.pop(cid, None)
 
 
-def cleanup_disconnected_clients(servicer):
-    """Remove clients that haven't been seen for more than 5 minutes"""
-    current_time = time.time()
-    timeout = 300  # 5 minutes
-
-    clients_to_remove = []
-    for client_id, info in servicer.connected_clients.items():
-        if current_time - info.get("last_seen", 0) > timeout:
-            clients_to_remove.append(client_id)
-
-    for client_id in clients_to_remove:
-        logger.info(f"Removing inactive client: {client_id}")
-        if client_id in servicer.connected_clients:
-            del servicer.connected_clients[client_id]
-            if client_id in servicer.notification_queues:
-                del servicer.notification_queues[client_id]
-            logger.info(f"Removed inactive client: {client_id}")
-
-
-def serve():
+# -----------------------------------------------------------------------------
+# gRPC server bootstrap
+# -----------------------------------------------------------------------------
+def serve() -> None:
     zk_hosts = os.getenv("ZK_HOSTS", "127.0.0.1:2181")
+    host = socket.gethostname()
 
-    servicer = FederatedLearningServiceServicer(zk_hosts=zk_hosts)
+    servicer = FederatedLearningServiceServicer(zk_hosts=zk_hosts, host=host)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     model_update_pb2_grpc.add_FederatedLearningServiceServicer_to_server(
         servicer, server
     )
     server.add_insecure_port("[::]:50051")
     server.start()
-    logger.info("Server started on port 50051.")
+    logger.info("Server %s started on port 50051", host)
 
-    # Background thread for periodic client cleanup
-    def cleanup_thread():
+    def cleanup_loop() -> None:
         while True:
             try:
-                cleanup_disconnected_clients(servicer)
-                time.sleep(60)
+                servicer.cleanup_disconnected_clients()
             except Exception as e:
-                logger.info(f"Error in cleanup thread: {e}")
+                logger.error("Cleanup thread error: %s", e, exc_info=True)
+            time.sleep(60)
 
-    cleanup_task = threading.Thread(target=cleanup_thread, daemon=True)
-    cleanup_task.start()
+    threading.Thread(target=cleanup_loop, daemon=True).start()
 
     try:
         while True:
             time.sleep(86400)
     except KeyboardInterrupt:
-        logger.info("Server shutting down...")
+        logger.info("Shutting down…")
         server.stop(0)
-        if servicer.zk is not None:
-            servicer.zk.stop()
-            servicer.zk.close()
+        servicer.zk.stop()
+        servicer.zk.close()
 
 
 if __name__ == "__main__":

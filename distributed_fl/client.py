@@ -61,7 +61,12 @@ class FederatedClient:
         self, model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct", adapter_path=None
     ):
         if adapter_path is not None:
-            adapter_path = os.path.join(PATH_TO_ADAPTERS, "central", "latest")
+            latest_version = find_latest_adapter_version(
+                os.path.join(PATH_TO_ADAPTERS, "central")
+            )
+            adapter_path = os.path.join(
+                PATH_TO_ADAPTERS, "central", f"v{latest_version}"
+            )
         self.agent = LoraHuggingFaceAgent(
             model_name=model_id, adapter_path=adapter_path
         )
@@ -345,16 +350,6 @@ class FederatedClient:
 
         logger.info(f"Saved adapter version {version} to {version_dir}")
         return version_dir
-
-    def load_latest_adapter(self):
-        """Load the latest adapter from disk"""
-        # Find the latest version
-        # latest_version = find_latest_adapter_version()
-        self.agent.model = PeftModel.from_pretrained(
-            self.agent.model.get_base_model(),  # Get the original base model without adapters
-            os.path.join(PATH_TO_ADAPTERS, "central", f"latest"),
-            is_trainable=False,  # Set as needed
-        )
 
 
 def run(client_id="client_1", server_address="localhost:50051", interval=10):
