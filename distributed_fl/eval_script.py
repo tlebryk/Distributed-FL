@@ -94,7 +94,7 @@ def evaluate(
     df.success.value_counts()
     # save df with current timestamp
     os.makedirs("results", exist_ok=True)
-    df.to_csv(f"results/results_{datetime.utcnow().isoformat()}.csv")
+    df.to_csv(f"results_{datetime.now().isoformat().replace(':', '-')}.csv")
     print(df[["generated_text", "success"]])
 
     current_pct = compute_percent_success(results)
