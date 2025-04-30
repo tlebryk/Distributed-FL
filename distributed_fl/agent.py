@@ -71,7 +71,7 @@ class LoraHuggingFaceAgent(CodeGenerationAgent):
         if self.generation_config:
             output_ids = self.model.generate(input_ids, **self.generation_config)
         else:
-            output_ids = self.model.generate(input_ids)
+            output_ids = self.model.generate(input_ids, max_new_tokens=100)
 
         generated_text = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
         return generated_text

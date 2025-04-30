@@ -106,19 +106,6 @@ class FederatedLearningServiceServicer(
         return weight
 
     def weighted_average(self, update_requests, use_pylint=True):
-        # Pre-compute weights outside the parameter loop to avoid excessive logging
-        # client_weights = {}
-        # for update_request in update_requests:
-
-        #     if use_pylint:
-        #         # Log only once per client
-        #         logger.info(f"Weight for {client_id}: {weight}")
-        #         logger.info(
-        #             f"pylint_score for {client_id}: {update_request.pylint_score}"
-        #         )
-        #         weight *= (update_request.pylint_score + 0.01) / 10
-
-        #     client_weights[client_id] = weight
 
         # Now use the pre-computed weights in the parameter aggregation
         aggregated_state = {}
@@ -155,6 +142,7 @@ class FederatedLearningServiceServicer(
                 weight = self.get_client_weight(client_id)
             else:
                 weight = 0.5
+                logger.info("zk not available")
             decoded_msg = DecodedModelUpdate(
                 client_id=request.client_id,
                 update=decoded_dict,
@@ -251,6 +239,7 @@ class FederatedLearningServiceServicer(
                 # TODO: retry logic
                 # implement eval loop and send if good update
                 if not result:
+                    logger.info("initial aggregation failed, trying per client update")
                     for i, update_subset in enumerate(
                         self._leave_one_out_batches(self.update_requests)
                     ):
