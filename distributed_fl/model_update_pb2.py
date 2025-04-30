@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12model_update.proto\x12\tfederated\"T\n\x0bModelUpdate\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x0e\n\x06update\x18\x02 \x01(\x0c\x12\x0f\n\x07version\x18\x03 \x01(\x05\x12\x11\n\ttimestamp\x18\x04 \x01(\x03\"7\n\x0f\x41ggregatedModel\x12\x13\n\x0bmodel_state\x18\x01 \x01(\x0c\x12\x0f\n\x07version\x18\x02 \x01(\x05\"3\n\x0f\x41\x63knowledgement\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\";\n\rClientRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x17\n\x0f\x63urrent_version\x18\x02 \x01(\x05\"Z\n\x10\x43lientConnection\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x17\n\x0f\x63urrent_version\x18\x02 \x01(\x05\x12\x1a\n\x12ready_for_training\x18\x03 \x01(\x08\"Y\n\x10ModelVersionInfo\x12\x18\n\x10update_available\x18\x01 \x01(\x08\x12\x16\n\x0elatest_version\x18\x02 \x01(\x05\x12\x13\n\x0bmodel_state\x18\x03 \x01(\x0c\">\n\x12UpdateNotification\x12\x13\n\x0bnew_version\x18\x01 \x01(\x05\x12\x13\n\x0bupdate_type\x18\x02 \x01(\t2\xc6\x02\n\x18\x46\x65\x64\x65ratedLearningService\x12\x42\n\x0cSubmitUpdate\x12\x16.federated.ModelUpdate\x1a\x1a.federated.Acknowledgement\x12J\n\x12GetAggregatedModel\x12\x18.federated.ClientRequest\x1a\x1a.federated.AggregatedModel\x12I\n\rConnectClient\x12\x1b.federated.ClientConnection\x1a\x1b.federated.ModelVersionInfo\x12O\n\x12SubscribeToUpdates\x12\x18.federated.ClientRequest\x1a\x1d.federated.UpdateNotification0\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x12model_update.proto\x12\tfederated\"j\n\x0bModelUpdate\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x0e\n\x06update\x18\x02 \x01(\x0c\x12\x0f\n\x07version\x18\x03 \x01(\x05\x12\x11\n\ttimestamp\x18\x04 \x01(\x03\x12\x14\n\x0cpylint_score\x18\x05 \x01(\x02\"7\n\x0f\x41ggregatedModel\x12\x13\n\x0bmodel_state\x18\x01 \x01(\x0c\x12\x0f\n\x07version\x18\x02 \x01(\x05\"3\n\x0f\x41\x63knowledgement\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\";\n\rClientRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x17\n\x0f\x63urrent_version\x18\x02 \x01(\x05\"Z\n\x10\x43lientConnection\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x17\n\x0f\x63urrent_version\x18\x02 \x01(\x05\x12\x1a\n\x12ready_for_training\x18\x03 \x01(\x08\"Y\n\x10ModelVersionInfo\x12\x18\n\x10update_available\x18\x01 \x01(\x08\x12\x16\n\x0elatest_version\x18\x02 \x01(\x05\x12\x13\n\x0bmodel_state\x18\x03 \x01(\x0c\">\n\x12UpdateNotification\x12\x13\n\x0bnew_version\x18\x01 \x01(\x05\x12\x13\n\x0bupdate_type\x18\x02 \x01(\t2\xc6\x02\n\x18\x46\x65\x64\x65ratedLearningService\x12\x42\n\x0cSubmitUpdate\x12\x16.federated.ModelUpdate\x1a\x1a.federated.Acknowledgement\x12J\n\x12GetAggregatedModel\x12\x18.federated.ClientRequest\x1a\x1a.federated.AggregatedModel\x12I\n\rConnectClient\x12\x1b.federated.ClientConnection\x1a\x1b.federated.ModelVersionInfo\x12O\n\x12SubscribeToUpdates\x12\x18.federated.ClientRequest\x1a\x1d.federated.UpdateNotification0\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -22,19 +22,19 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'model_update_pb2', _globals
 if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _globals['_MODELUPDATE']._serialized_start=33
-  _globals['_MODELUPDATE']._serialized_end=117
-  _globals['_AGGREGATEDMODEL']._serialized_start=119
-  _globals['_AGGREGATEDMODEL']._serialized_end=174
-  _globals['_ACKNOWLEDGEMENT']._serialized_start=176
-  _globals['_ACKNOWLEDGEMENT']._serialized_end=227
-  _globals['_CLIENTREQUEST']._serialized_start=229
-  _globals['_CLIENTREQUEST']._serialized_end=288
-  _globals['_CLIENTCONNECTION']._serialized_start=290
-  _globals['_CLIENTCONNECTION']._serialized_end=380
-  _globals['_MODELVERSIONINFO']._serialized_start=382
-  _globals['_MODELVERSIONINFO']._serialized_end=471
-  _globals['_UPDATENOTIFICATION']._serialized_start=473
-  _globals['_UPDATENOTIFICATION']._serialized_end=535
-  _globals['_FEDERATEDLEARNINGSERVICE']._serialized_start=538
-  _globals['_FEDERATEDLEARNINGSERVICE']._serialized_end=864
+  _globals['_MODELUPDATE']._serialized_end=139
+  _globals['_AGGREGATEDMODEL']._serialized_start=141
+  _globals['_AGGREGATEDMODEL']._serialized_end=196
+  _globals['_ACKNOWLEDGEMENT']._serialized_start=198
+  _globals['_ACKNOWLEDGEMENT']._serialized_end=249
+  _globals['_CLIENTREQUEST']._serialized_start=251
+  _globals['_CLIENTREQUEST']._serialized_end=310
+  _globals['_CLIENTCONNECTION']._serialized_start=312
+  _globals['_CLIENTCONNECTION']._serialized_end=402
+  _globals['_MODELVERSIONINFO']._serialized_start=404
+  _globals['_MODELVERSIONINFO']._serialized_end=493
+  _globals['_UPDATENOTIFICATION']._serialized_start=495
+  _globals['_UPDATENOTIFICATION']._serialized_end=557
+  _globals['_FEDERATEDLEARNINGSERVICE']._serialized_start=560
+  _globals['_FEDERATEDLEARNINGSERVICE']._serialized_end=886
 # @@protoc_insertion_point(module_scope)

@@ -23,8 +23,6 @@ from utils import find_latest_adapter_version, load_safetensors_from_bytes
 from safetensors.torch import save_file
 import shutil
 
-import model_update_pb2
-import model_update_pb2_grpc
 
 logger = get_logger(__name__)
 
@@ -44,6 +42,7 @@ class DecodedModelUpdate(NamedTuple):
     update: Dict[str, Any]
     version: int
     timestamp: int
+    pylint_score: float
 
 
 class FederatedLearningServiceServicer(
@@ -62,7 +61,6 @@ class FederatedLearningServiceServicer(
         # Map of client_id to notification queues for update streaming
         self.notification_queues = {}  # {client_id: Queue()}
         self.benchmark = HumanEvalBenchmark()
-        self.benchmark.load_dataset()
 
         if mode == "test":
             self.benchmark.dataset = self.benchmark.dataset.select(range(2))

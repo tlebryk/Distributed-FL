@@ -2,3 +2,5 @@
 *.pytest_cache
 *__pycache__
 */node_modules/*
+distributed_fl/adapters/
+tmp/

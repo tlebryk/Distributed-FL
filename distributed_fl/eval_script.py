@@ -130,6 +130,5 @@ if __name__ == "__main__":
         model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
         adapter_path="/home/tlebryk/262_distributed_systems/Distributed-FL/distributed_fl/adapters/personal/1",
     )
-    human_eval.load_dataset()
     human_eval.dataset = human_eval.dataset.select(range(2))
     evaluate(code_agent, human_eval, results_csv=args.results_csv, mode=args.mode)

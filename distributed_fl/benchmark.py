@@ -18,6 +18,7 @@ class Benchmark(ABC):
     def __init__(self, timeout: int = 5):
         self.timeout = timeout
         self.dataset = None
+        self.load_dataset()
 
     @abstractmethod
     def load_dataset(self):
