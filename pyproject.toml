@@ -16,6 +16,7 @@ dependencies = [
     "trl>=0.16.1",
     "kazoo>=2.10.0",
     "pylint>=3.3.6",
+    "flask-cors>=5.0.1",
 ]
 
 [dependency-groups]

@@ -4,8 +4,10 @@ from flask import Flask, request, jsonify
 import threading
 import torch
 import agent
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app, resources={r"/generate": {"origins": "*"}})
 PATH_TO_ADAPTERS = os.environ.get("PATH_TO_ADAPTERS", "./distributed_fl/adapters")
 
 
@@ -28,6 +30,7 @@ shared_state = SharedState()
 def generate():
     # Check if model is training
     if shared_state.is_training:
+        print("Is training...")
         return (
             jsonify({"error": "Model is currently training. Please try again later."}),
             503,
@@ -35,11 +38,13 @@ def generate():
 
     # Check if model is loaded
     if shared_state.agent.model is None or shared_state.agent.tokenizer is None:
+        print("Model is not initialized yet...")
         return jsonify({"error": "Model not initialized yet"}), 503
 
     # Get prompt from request
     data = request.json
     if not data or "prompt" not in data:
+        print("Missing 'prompt' field in request...")
         return jsonify({"error": "Missing 'prompt' field in request"}), 400
 
     prompt = data["prompt"]
@@ -54,7 +59,7 @@ def generate():
             with torch.no_grad():
                 outputs = shared_state.agent.model.generate(
                     inputs["input_ids"],
-                    max_new_tokens=512,
+                    max_new_tokens=50,
                     temperature=0.7,
                     top_p=0.9,
                     num_return_sequences=1,
@@ -71,8 +76,11 @@ def generate():
             # Note: This is a simplistic approach and might need adjustment based on the model
             generated_only = generated_text[len(prompt) :].strip()
 
+            print(f"Generated text: {generated_only}")
+
             return jsonify({"generated_text": generated_only}), 200
     except Exception as e:
+        print(f"Generation error: {str(e)}")
         return jsonify({"error": f"Generation error: {str(e)}"}), 500
 
 
