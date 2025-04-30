@@ -110,6 +110,7 @@ def create_huggingface_dataset(directory_path, pattern="*.py", function_name=Non
                 continue
             try:
                 pylint_score = run_pylint(file_path)
+                print(f"Pylint score for {file_path}: {pylint_score}")
             except Exception as e:
                 print(f"Error running pylint on {file_path}: {str(e)}")
                 pylint_score = 0

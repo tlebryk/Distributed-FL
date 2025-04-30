@@ -92,7 +92,7 @@ class FederatedLearningServiceServicer(
     def get_client_weight(self, client_id):
 
         path = f"/myapp/clients/{client_id}"
-        # weight = 0.5
+        weight = 0.5
         if self.zk.exists(path):
             raw, stat = self.zk.get(path)
             weight = float(raw.decode("utf-8"))
@@ -114,11 +114,11 @@ class FederatedLearningServiceServicer(
                 else:
                     weight = 1
                 if use_pylint:
-                    print(f"Weight for {update_requests.client_id}: {weight}")
-                    print(
+                    logger.info(f"Weight for {update_requests.client_id}: {weight}")
+                    logger.info(
                         f"pylint_score for {update_requests.client_id}: {update_requests.pylint_score}"
                     )
-                    weight *= update_requests.pylint_score / 10
+                    weight *= (update_requests.pylint_score + 0.01) / 10
                 aggregated_state[key] += update_requests.update[key] * weight
                 total_weight += weight
 

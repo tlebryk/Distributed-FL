@@ -256,6 +256,7 @@ class FederatedClient:
             bytes_ = f.read()
         # TODO: decouple pylint and bytes and get cleaner average?
         pylint_score = mean(train_dataset["pylint_score"])
+        logger.info(f"Average pylint score: {pylint_score}")
 
         return bytes_, pylint_score
 
