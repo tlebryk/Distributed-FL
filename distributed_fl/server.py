@@ -99,6 +99,7 @@ class FederatedLearningServiceServicer(
             print(f"Weight for {client_id}: {weight}")
         else:
             print(f"No entry for {client_id}")
+            self.update_client_weight(client_id, weight)
 
         return weight
 
