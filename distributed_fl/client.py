@@ -186,7 +186,7 @@ class FederatedClient:
             logger.info(f"Error getting latest model: {e}")
             return False
 
-    def train_and_submit(self, mode="debug"):
+    def train_and_submit(self, mode="debug", code_path="./data"):
         """Simulate training and submit local update to the server."""
         try:
             logger.info("Training local model...")
@@ -224,7 +224,7 @@ class FederatedClient:
             traceback.print_exc()
             return False
 
-    def get_adapter_update(self, agent):
+    def get_adapter_update(self, agent, code_path="./data"):
         """
         Extract adapter-specific parameters, simulate a local training update by adding
         small Gaussian noise, and then compress the serialized adapter update.
@@ -238,7 +238,7 @@ class FederatedClient:
         # train agent.model here
         # get training data
         # TODO: figure out file paths
-        train_dataset = create_huggingface_dataset("./data")
+        train_dataset = create_huggingface_dataset(code_path)
         print(f"{len(train_dataset)=}")
         # train agent.model
         personal_adapters = os.path.join(PATH_TO_ADAPTERS, "client", "personal")
@@ -260,11 +260,11 @@ class FederatedClient:
 
         return bytes_, pylint_score
 
-    def run_training_loop(self, interval=15):
+    def run_training_loop(self, interval=10, code_path="./data"):
         """Main training loop with periodic update submissions."""
         try:
             while self.running:
-                self.train_and_submit()
+                self.train_and_submit(code_path=code_path)
                 time.sleep(interval)
         except KeyboardInterrupt:
             self.shutdown()
@@ -364,7 +364,12 @@ class FederatedClient:
         return version_dir
 
 
-def run(client_id="client_1", server_address="localhost:50051", interval=10):
+def run(
+    client_id="client_1",
+    server_address="localhost:50051",
+    interval=10,
+    code_path="./data",
+):
     """
     Create and run the FederatedClient. The function accepts keyword arguments
     for customization.
@@ -376,7 +381,7 @@ def run(client_id="client_1", server_address="localhost:50051", interval=10):
 
     update_thread = client.subscribe_to_updates()
     try:
-        client.run_training_loop(interval=interval)
+        client.run_training_loop(interval=interval, code_path=code_path)
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
     finally:
@@ -391,6 +396,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Federated Learning Client")
     parser.add_argument(
         "--client_id",
+        "-c",
         type=str,
         default="client_1",
         help="Unique identifier for this client",
@@ -404,8 +410,14 @@ def parse_args():
     parser.add_argument(
         "--interval",
         type=int,
-        default=10,
+        default=15,
         help="Interval (in seconds) between training submissions",
+    )
+    parser.add_argument(
+        "--code_path",
+        type=str,
+        default="./data",
+        help="Path to the code directory",
     )
     return parser.parse_args()
 

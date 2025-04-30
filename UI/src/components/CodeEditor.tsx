@@ -1,4 +1,4 @@
-
+// CodeEditor.tsx
 import React, { useState, useEffect } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { python } from '@codemirror/lang-python';
@@ -27,7 +27,7 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
   ]);
   const [cursorPosition, setCursorPosition] = useState({ line: 0, ch: 0 });
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState<number>(-1);
-  
+
   // Update suggestions whenever code changes with a slight delay
   useEffect(() => {
     // Using a debounce to avoid too many suggestion updates while typing
@@ -35,7 +35,7 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
       const newSuggestions = SuggestionService.getSuggestions(code, cursorPosition);
       setSuggestions(newSuggestions);
     }, 500); // 500ms delay
-    
+
     return () => clearTimeout(timer);
   }, [code, cursorPosition]);
 
@@ -50,17 +50,17 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
     setCode(code + '\n' + suggestion.text);
     setActiveSuggestionIndex(-1);
   };
-  
+
   // Handle keyboard navigation for suggestions
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setActiveSuggestionIndex(prev => 
+      setActiveSuggestionIndex(prev =>
         prev < suggestions.length - 1 ? prev + 1 : 0
       );
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setActiveSuggestionIndex(prev => 
+      setActiveSuggestionIndex(prev =>
         prev > 0 ? prev - 1 : suggestions.length - 1
       );
     } else if (e.key === 'Enter' && activeSuggestionIndex >= 0) {
@@ -79,7 +79,7 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
         </CardHeader>
         <CardContent>
           <div className="border rounded-md overflow-hidden">
-            <div 
+            <div
               onKeyDown={handleKeyDown}
               tabIndex={0}
               className="focus:outline-none"
@@ -112,7 +112,7 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
           </div>
         </CardContent>
       </Card>
-      
+
       <Card className="w-full md:w-64">
         <CardHeader>
           <CardTitle>Suggestions</CardTitle>
@@ -120,7 +120,7 @@ const CodeEditor: React.FC<CodeEditorProps> = ({
         <CardContent>
           <div className="space-y-2">
             {suggestions.map((suggestion, index) => (
-              <SuggestionCard 
+              <SuggestionCard
                 key={index}
                 suggestion={suggestion}
                 onClick={() => insertSuggestion(suggestion)}
