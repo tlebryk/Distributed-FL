@@ -23,6 +23,7 @@ from training import train_model, ModelArguments
 from agent import LoraHuggingFaceAgent
 from utils import load_safetensors_from_bytes, find_latest_adapter_version
 from safetensors.torch import save_file
+from statistics import mean
 
 logger = get_logger(__name__)
 
@@ -190,7 +191,7 @@ class FederatedClient:
         try:
             logger.info("Training local model...")
             with self.lock:
-                update_payload = self.get_adapter_update(self.agent)
+                update_payload, pylint_score = self.get_adapter_update(self.agent)
                 if mode == "debug":
                     payload_size_bytes = len(update_payload)
                     payload_size_kb = payload_size_bytes / 1024
@@ -205,6 +206,7 @@ class FederatedClient:
                     update=update_payload,
                     version=current_ver,
                     timestamp=int(time.time()),
+                    pylint_score=pylint_score,
                 )
                 logger.info(f"Submitting update to server (version: {current_ver})...")
                 ack = self.stub.SubmitUpdate(update_message)
@@ -252,9 +254,12 @@ class FederatedClient:
         )
         with open(os.path.join(output_dir, "adapter_model.safetensors"), "rb") as f:
             bytes_ = f.read()
-        return bytes_
+        # TODO: decouple pylint and bytes and get cleaner average?
+        pylint_score = mean(train_dataset["pylint_score"])
 
-    def run_training_loop(self, interval=10):
+        return bytes_, pylint_score
+
+    def run_training_loop(self, interval=15):
         """Main training loop with periodic update submissions."""
         try:
             while self.running:

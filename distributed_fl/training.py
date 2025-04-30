@@ -151,9 +151,7 @@ def train_model(
 
     def formatting_prompts_func(example):
         output_texts = []
-        text = (
-            f"### Question: {example['instruction']}\n ### Answer: {example['output']}"
-        )
+        text = f"{example['instruction']}\n {example['output']}"
         output_texts.append(text)
         return text
 

@@ -15,6 +15,7 @@ dependencies = [
     "datasets>=3.5.0",
     "trl>=0.16.1",
     "kazoo>=2.10.0",
+    "pylint>=3.3.6",
 ]
 
 [dependency-groups]

@@ -65,7 +65,7 @@ class FederatedLearningServiceServicer(
         self.benchmark.load_dataset()
 
         if mode == "test":
-            self.benchmark.dataset = self.benchmark.dataset.select(range(1))
+            self.benchmark.dataset = self.benchmark.dataset.select(range(2))
         try:
             self.zk = KazooClient(hosts=zk_hosts)
             self.zk.start()
@@ -78,8 +78,8 @@ class FederatedLearningServiceServicer(
         self.zk.ensure_path("/myapp/clients")
 
         # 4. Create or update a znode for client_id → weight
-        client_id = "client123"
-        weight = 0.42
+        # client_id = "client123"
+        # weight = 0.42
 
         path = f"/myapp/clients/{client_id}"
         data = str(weight).encode("utf-8")
@@ -94,7 +94,7 @@ class FederatedLearningServiceServicer(
     def get_client_weight(self, client_id):
 
         path = f"/myapp/clients/{client_id}"
-        weight = 0.5
+        # weight = 0.5
         if self.zk.exists(path):
             raw, stat = self.zk.get(path)
             weight = float(raw.decode("utf-8"))
@@ -104,7 +104,7 @@ class FederatedLearningServiceServicer(
 
         return weight
 
-    def weighted_average(self):
+    def weighted_average(self, use_pylint=True):
         aggregated_state = {}
         for key in self.update_requests[0].update.keys():
             aggregated_state[key] = 0
@@ -115,6 +115,12 @@ class FederatedLearningServiceServicer(
                     weight = self.get_client_weight(update_requests.client_id)
                 else:
                     weight = 1
+                if use_pylint:
+                    print(f"Weight for {update_requests.client_id}: {weight}")
+                    print(
+                        f"pylint_score for {update_requests.client_id}: {update_requests.pylint_score}"
+                    )
+                    weight *= update_requests.pylint_score / 10
                 aggregated_state[key] += update_requests.update[key] * weight
                 total_weight += weight
 
@@ -139,6 +145,7 @@ class FederatedLearningServiceServicer(
                 update=decoded_dict,
                 version=request.version,
                 timestamp=request.timestamp,
+                pylint_score=request.pylint_score,
             )
 
             logger.info(
@@ -178,6 +185,7 @@ class FederatedLearningServiceServicer(
     def _perform_aggregation_and_evaluation(self):
         """Background thread to perform aggregation and evaluation."""
         try:
+            # TODO: this lock too long... probably could split into two locks?
             with self.update_lock:
                 # Check if another thread already processed these updates
                 if len(self.update_requests) < 2:
@@ -189,51 +197,51 @@ class FederatedLearningServiceServicer(
                 # Assume all updates have matching keys
                 self.global_adapter_state = aggregated_state
 
-            logger.info("Aggregated global adapter state updated.")
-            round_path = os.path.join(
-                PATH_TO_ADAPTERS,
-                "server",
-                "rounds",
-            )
-            latest_round = find_latest_adapter_version(round_path)
-            updated_round = latest_round + 1
-            output_dir = os.path.join(round_path, f"v{updated_round}")
-            os.makedirs(output_dir, exist_ok=True)
-            save_file(
-                self.global_adapter_state,
-                os.path.join(output_dir, "adapter_model.safetensors"),
-            )
-            shutil.copy2(
-                os.path.join(PATH_TO_ADAPTERS, "adapter_config.json"),
-                os.path.join(output_dir, "adapter_config.json"),
-            )
-
-            code_agent = LoraHuggingFaceAgent(
-                model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
-                adapter_path=output_dir,
-            )
-            result = evaluate(
-                code_agent,
-                self.benchmark,
-                results_csv="experiments.csv",
-                mode="prod",
-            )
-            # TODO: retry logic
-            # implement eval loop and send if good update
-            if result:
-                main_path = os.path.join(PATH_TO_ADAPTERS, "server", "central")
-                # get latest version
-                latest_version = find_latest_adapter_version(main_path)
-                updated_version = latest_version + 1
-                output_dir = os.path.join(main_path, f"v{updated_version}")
+                logger.info("Aggregated global adapter state updated.")
+                round_path = os.path.join(
+                    PATH_TO_ADAPTERS,
+                    "server",
+                    "rounds",
+                )
+                latest_round = find_latest_adapter_version(round_path)
+                updated_round = latest_round + 1
+                output_dir = os.path.join(round_path, f"v{updated_round}")
                 os.makedirs(output_dir, exist_ok=True)
                 save_file(
                     self.global_adapter_state,
                     os.path.join(output_dir, "adapter_model.safetensors"),
                 )
-                self.version = updated_version
-                # Notify all subscribed clients of the new model
-                self._notify_clients_of_update()
+                shutil.copy2(
+                    os.path.join(PATH_TO_ADAPTERS, "adapter_config.json"),
+                    os.path.join(output_dir, "adapter_config.json"),
+                )
+
+                code_agent = LoraHuggingFaceAgent(
+                    model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
+                    adapter_path=output_dir,
+                )
+                result = evaluate(
+                    code_agent,
+                    self.benchmark,
+                    results_csv="experiments.csv",
+                    mode="prod",
+                )
+                # TODO: retry logic
+                # implement eval loop and send if good update
+                if result:
+                    main_path = os.path.join(PATH_TO_ADAPTERS, "server", "central")
+                    # get latest version
+                    latest_version = find_latest_adapter_version(main_path)
+                    updated_version = latest_version + 1
+                    output_dir = os.path.join(main_path, f"v{updated_version}")
+                    os.makedirs(output_dir, exist_ok=True)
+                    save_file(
+                        self.global_adapter_state,
+                        os.path.join(output_dir, "adapter_model.safetensors"),
+                    )
+                    self.version = updated_version
+                    # Notify all subscribed clients of the new model
+                    self._notify_clients_of_update()
         except Exception as e:
             import traceback
 
