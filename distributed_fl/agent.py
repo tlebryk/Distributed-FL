@@ -91,7 +91,7 @@ class LoraHuggingFaceAgent(CodeGenerationAgent):
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.bfloat16,
+            # torch_dtype=torch.float16,
             # device_maps="auto",
         )
         if adapter_config is None:

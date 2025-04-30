@@ -236,7 +236,7 @@ class FederatedClient:
         # train agent.model here
         # get training data
         # TODO: figure out file paths
-        train_dataset = create_huggingface_dataset("./Distributed-FL/data")
+        train_dataset = create_huggingface_dataset("/Users/richaelsaka/Desktop/Distributed-FL/data")
         print(f"{len(train_dataset)=}")
         # train agent.model
         personal_adapters = os.path.join(PATH_TO_ADAPTERS, "client", "personal")

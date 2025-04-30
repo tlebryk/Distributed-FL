@@ -172,7 +172,7 @@ def train_model(
         warmup_ratio=0.05,
         weight_decay=0.01,
         bf16=False,
-        fp16=True,
+        fp16=False,
         save_total_limit=3,
         per_device_train_batch_size=1,
         packing=True,
