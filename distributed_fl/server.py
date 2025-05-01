@@ -1,4 +1,5 @@
 # server.py
+import csv
 import io
 import queue
 import threading
@@ -18,23 +19,15 @@ from benchmark import HumanEvalBenchmark
 from agent import LoraHuggingFaceAgent
 from safetensors.torch import load_file
 from logger import get_logger
-from kazoo.client import KazooClient
 from utils import find_latest_adapter_version, load_safetensors_from_bytes
 from safetensors.torch import save_file
 import shutil
 
+from distributed_fl.zk_manager import ZKManager
 
 logger = get_logger(__name__)
 
 PATH_TO_ADAPTERS = "./distributed_fl/adapters"
-
-
-# @dataclass
-# class ClientUpdate:
-#     client_id: str
-#     version: int
-#     weight: float
-#     adapter_state: Dict[str, Any]  # your tensor dict
 
 
 class DecodedModelUpdate(NamedTuple):
@@ -66,54 +59,17 @@ class FederatedLearningServiceServicer(
 
         if mode == "test":
             self.benchmark.dataset = self.benchmark.dataset.select(range(2))
-        try:
-            self.zk = KazooClient(hosts=zk_hosts)
-            self.zk.start()
-        except:
-            self.zk = None
-
-    def update_client_weight(self, client_id, weight):
-
-        # 3. Ensure the parent path exists
-        self.zk.ensure_path("/myapp/clients")
-
-        # 4. Create or update a znode for client_id → weight
-        # client_id = "client123"
-        # weight = 0.42
-
-        path = f"/myapp/clients/{client_id}"
-        data = str(weight).encode("utf-8")
-
-        if self.zk.exists(path):
-            self.zk.set(path, data)
-        else:
-            self.zk.create(path, data, makepath=True)
-
-        print(f"Set {path} = {weight}")
-
-    def get_client_weight(self, client_id):
-
-        path = f"/myapp/clients/{client_id}"
-        weight = 0.5
-        if self.zk.exists(path):
-            raw, stat = self.zk.get(path)
-            weight = float(raw.decode("utf-8"))
-            print(f"Weight for {client_id}: {weight}")
-        else:
-            print(f"No entry for {client_id}")
-            self.update_client_weight(client_id, weight)
-
-        return weight
+        self.zkmanager = ZKManager(hosts=zk_hosts)
 
     def weighted_average(self, update_requests, use_pylint=True):
 
         # Now use the pre-computed weights in the parameter aggregation
         aggregated_state = {}
-        for key in self.update_requests[0].update.keys():
+        for key in update_requests[0].update.keys():
             aggregated_state[key] = 0
             total_weight = 0
 
-            for update_request in self.update_requests:
+            for update_request in update_requests:
                 client_id = update_request.client_id
                 weight = (
                     update_request.weight * min(update_request.pylint_score, 0.01) / 10
@@ -139,7 +95,7 @@ class FederatedLearningServiceServicer(
         try:
             decoded_dict = load_safetensors_from_bytes(request.update)
             if self.zk is not None:
-                weight = self.get_client_weight(client_id)
+                weight = self.zkmanager.get_client_weight(client_id)
             else:
                 weight = 0.5
                 logger.info("zk not available")
@@ -186,6 +142,25 @@ class FederatedLearningServiceServicer(
             logger.info("Error in SubmitUpdate:", e)
             return model_update_pb2.Acknowledgement(success=False, message=str(e))
 
+    # TODO: make this persistent across replicas...
+    @staticmethod
+    def save_run_result(run_info, path):
+        """
+        Append a new run_info dict to the CSV (creates file if needed).
+        """
+        file_exists = False
+        try:
+            with open(path) as _:
+                file_exists = True
+        except FileNotFoundError:
+            pass
+
+        with open(path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=run_info.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(run_info)
+
     def perform_eval(self, aggregated_state):
 
         # Assume all updates have matching keys
@@ -214,13 +189,26 @@ class FederatedLearningServiceServicer(
             model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
             adapter_path=output_dir,
         )
-        result = evaluate(
+        run_info = evaluate(
             code_agent,
             self.benchmark,
             results_csv="experiments.csv",
             mode="prod",
         )
-        return result
+        current_pct = float(run_info["accuracy"])
+        # past_runs = load_previous_results(results_csv)
+        best_pct = float(self.zkmanager.get_past_accuracy())
+        # 6. Compare to best and report
+        if current_pct < best_pct:
+            logger.info(
+                "Current run underperforms best run: {:.2f}% < {:.2f}%".format(
+                    current_pct, best_pct
+                )
+            )
+            return False, run_info
+        else:
+            # logging.info("Current run matches or exceeds best run.")
+            return True, run_info
 
     def _perform_aggregation_and_evaluation(self):
         """Background thread to perform aggregation and evaluation."""

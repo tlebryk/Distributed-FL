@@ -26,40 +26,22 @@ def load_previous_results(path):
         return []
 
 
-def save_run_result(run_info, path):
+def get_best_success(runs):
     """
-    Append a new run_info dict to the CSV (creates file if needed).
+    Extract best accuracy from past runs.
     """
-    file_exists = False
-    try:
-        with open(path) as _:
-            file_exists = True
-    except FileNotFoundError:
-        pass
-
-    with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=run_info.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(run_info)
+    if not runs:
+        return 0.0
+    return max(float(r["accuracy"]) for r in runs)
 
 
-def compute_percent_success(results):
+def compute_accuracy(results):
     """
     Compute percent of successful examples.
     """
     total = len(results)
     successes = sum(1 for r in results if r["success"])
     return successes / total * 100 if total > 0 else 0.0
-
-
-def get_best_success(runs):
-    """
-    Extract best percent_success from past runs.
-    """
-    if not runs:
-        return 0.0
-    return max(float(r["percent_success"]) for r in runs)
 
 
 # --- Main evaluation with persistence ---
@@ -82,42 +64,30 @@ def evaluate(
     logging.basicConfig(level=logging.INFO)
 
     # 1. Load previous experiments
-    past_runs = load_previous_results(results_csv)
-    best_pct = get_best_success(past_runs)
-    logging.info(f"Best previous percent_success: {best_pct:.2f}%")
 
     # 2. Setup model & dataset
 
     # %%
     results = benchmark.run(code_agent.model, code_agent.tokenizer)
     df = pd.DataFrame(results)
-    df.success.value_counts()
     # save df with current timestamp
     os.makedirs("results", exist_ok=True)
+    # This is fine locally for now.
     df.to_csv(f"results_{datetime.now().isoformat().replace(':', '-')}.csv")
-    print(df[["generated_text", "success"]])
+    # print(df[["generated_text", "success"]])
 
-    current_pct = compute_percent_success(results)
-    logging.info(f"Current run percent_success: {current_pct:.2f}%")
+    current_pct = compute_accuracy(results)
+    logging.info(f"Current run accuracy: {current_pct:.2f}%")
 
     # 5. Save this run
     run_info = {
         "run_id": datetime.utcnow().isoformat(),
         "timestamp": datetime.now().isoformat(),
-        "percent_success": f"{current_pct:.2f}",
+        "accuracy": f"{current_pct:.2f}",
         "eval_rows": str(len(benchmark.dataset)),
         "hyperparameters": json.dumps({}),  # fill in if needed
     }
-    save_run_result(run_info, results_csv)
-    logging.info("Run result saved to experiments.csv")
-
-    # 6. Compare to best and report
-    if current_pct < best_pct:
-        logging.warning("Current run underperforms best run — retraining advised.")
-        return False
-    else:
-        # logging.info("Current run matches or exceeds best run.")
-        return True
+    return run_info
 
 
 if __name__ == "__main__":
