@@ -1,4 +1,4 @@
-
+// SuggestionCard.tsx
 import React from 'react';
 import { Suggestion } from './CodeEditor';
 import { cn } from '@/lib/utils';
@@ -15,7 +15,7 @@ const SuggestionCard: React.FC<SuggestionCardProps> = ({
   isActive = false,
 }) => {
   return (
-    <div 
+    <div
       className={cn(
         "p-2 border rounded-md cursor-pointer transition-colors",
         isActive ? "bg-slate-100 border-slate-300" : "hover:bg-slate-50"

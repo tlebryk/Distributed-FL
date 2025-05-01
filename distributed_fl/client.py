@@ -23,6 +23,7 @@ from training import train_model, ModelArguments
 from agent import LoraHuggingFaceAgent
 from utils import load_safetensors_from_bytes, find_latest_adapter_version
 from safetensors.torch import save_file
+from statistics import mean
 
 logger = get_logger(__name__)
 
@@ -185,12 +186,12 @@ class FederatedClient:
             logger.info(f"Error getting latest model: {e}")
             return False
 
-    def train_and_submit(self, mode="debug"):
+    def train_and_submit(self, mode="debug", code_path="./data"):
         """Simulate training and submit local update to the server."""
         try:
             logger.info("Training local model...")
             with self.lock:
-                update_payload = self.get_adapter_update(self.agent)
+                update_payload, pylint_score = self.get_adapter_update(self.agent)
                 if mode == "debug":
                     payload_size_bytes = len(update_payload)
                     payload_size_kb = payload_size_bytes / 1024
@@ -205,6 +206,7 @@ class FederatedClient:
                     update=update_payload,
                     version=current_ver,
                     timestamp=int(time.time()),
+                    pylint_score=pylint_score,
                 )
                 logger.info(f"Submitting update to server (version: {current_ver})...")
                 ack = self.stub.SubmitUpdate(update_message)
@@ -222,7 +224,7 @@ class FederatedClient:
             traceback.print_exc()
             return False
 
-    def get_adapter_update(self, agent):
+    def get_adapter_update(self, agent, code_path="./data"):
         """
         Extract adapter-specific parameters, simulate a local training update by adding
         small Gaussian noise, and then compress the serialized adapter update.
@@ -236,7 +238,7 @@ class FederatedClient:
         # train agent.model here
         # get training data
         # TODO: figure out file paths
-        train_dataset = create_huggingface_dataset("./Distributed-FL/data")
+        train_dataset = create_huggingface_dataset(code_path)
         print(f"{len(train_dataset)=}")
         # train agent.model
         personal_adapters = os.path.join(PATH_TO_ADAPTERS, "client", "personal")
@@ -252,13 +254,17 @@ class FederatedClient:
         )
         with open(os.path.join(output_dir, "adapter_model.safetensors"), "rb") as f:
             bytes_ = f.read()
-        return bytes_
+        # TODO: decouple pylint and bytes and get cleaner average?
+        pylint_score = mean(train_dataset["pylint_score"])
+        logger.info(f"Average pylint score: {pylint_score}")
 
-    def run_training_loop(self, interval=10):
+        return bytes_, pylint_score
+
+    def run_training_loop(self, interval=10, code_path="./data"):
         """Main training loop with periodic update submissions."""
         try:
             while self.running:
-                self.train_and_submit()
+                self.train_and_submit(code_path=code_path)
                 time.sleep(interval)
         except KeyboardInterrupt:
             self.shutdown()
@@ -358,7 +364,12 @@ class FederatedClient:
         return version_dir
 
 
-def run(client_id="client_1", server_address="localhost:50051", interval=10):
+def run(
+    client_id="client_1",
+    server_address="localhost:50051",
+    interval=10,
+    code_path="./data",
+):
     """
     Create and run the FederatedClient. The function accepts keyword arguments
     for customization.
@@ -370,7 +381,7 @@ def run(client_id="client_1", server_address="localhost:50051", interval=10):
 
     update_thread = client.subscribe_to_updates()
     try:
-        client.run_training_loop(interval=interval)
+        client.run_training_loop(interval=interval, code_path=code_path)
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
     finally:
@@ -385,6 +396,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Federated Learning Client")
     parser.add_argument(
         "--client_id",
+        "-c",
         type=str,
         default="client_1",
         help="Unique identifier for this client",
@@ -398,8 +410,14 @@ def parse_args():
     parser.add_argument(
         "--interval",
         type=int,
-        default=10,
+        default=15,
         help="Interval (in seconds) between training submissions",
+    )
+    parser.add_argument(
+        "--code_path",
+        type=str,
+        default="./data",
+        help="Path to the code directory",
     )
     return parser.parse_args()
 

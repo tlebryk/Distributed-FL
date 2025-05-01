@@ -4,6 +4,8 @@ import ast
 import sys
 from pathlib import Path
 from datasets import Dataset
+import subprocess
+import re
 
 
 def extract_function_parts(code_str, function_name=None):
@@ -92,7 +94,7 @@ def create_huggingface_dataset(directory_path, pattern="*.py", function_name=Non
     completions = []
     function_names = []
     file_paths = []
-
+    pylint_scores = []
     # Get all matching files in the directory
     path = Path(directory_path)
     all_files = list(path.glob(pattern))
@@ -106,13 +108,19 @@ def create_huggingface_dataset(directory_path, pattern="*.py", function_name=Non
             if "error" in functions_dict:
                 print(f"Error in {file_path}: {functions_dict['error']}")
                 continue
-
+            try:
+                pylint_score = run_pylint(file_path)
+                print(f"Pylint score for {file_path}: {pylint_score}")
+            except Exception as e:
+                print(f"Error running pylint on {file_path}: {str(e)}")
+                pylint_score = 0
             # Add each function to our dataset
             for func_name, (signature, body) in functions_dict.items():
                 prompts.append(signature)
                 completions.append(body)
                 function_names.append(func_name)
                 file_paths.append(str(file_path))
+                pylint_scores.append(pylint_score)
 
         except Exception as e:
             print(f"Error processing {file_path}: {str(e)}")
@@ -123,9 +131,37 @@ def create_huggingface_dataset(directory_path, pattern="*.py", function_name=Non
         "output": completions,
         "function_name": function_names,
         "file_path": file_paths,
+        "pylint_score": pylint_scores,
     }
     # TODO: change this
     return Dataset.from_dict(data)
+
+
+def run_pylint(file_path):
+    """
+    Run pylint on a Python file and return the score.
+
+    Args:
+        file_path (str): Path to the Python file
+
+    Returns:
+        float: The pylint score (0-10)
+    """
+    # Run pylint with the score output format
+    result = subprocess.run(
+        ["pylint", "--exit-zero", file_path], capture_output=True, text=True
+    )
+
+    # Extract the score using regex
+    output = result.stdout
+    match = re.search(r"Your code has been rated at ([-\d.]+)/10", output)
+
+    if match:
+        score = float(match.group(1))
+        return score
+    else:
+        # Return a default score if no score is found
+        return None
 
 
 # Example usage

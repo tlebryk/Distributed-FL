@@ -23,8 +23,6 @@ from utils import find_latest_adapter_version, load_safetensors_from_bytes
 from safetensors.torch import save_file
 import shutil
 
-import model_update_pb2
-import model_update_pb2_grpc
 
 logger = get_logger(__name__)
 
@@ -44,6 +42,8 @@ class DecodedModelUpdate(NamedTuple):
     update: Dict[str, Any]
     version: int
     timestamp: int
+    pylint_score: float
+    weight: float
 
 
 class FederatedLearningServiceServicer(
@@ -52,6 +52,7 @@ class FederatedLearningServiceServicer(
     def __init__(self, mode="test", zk_hosts="127.0.0.1:2181"):
         # Store received adapter updates
         self.update_requests = []
+        # self.historic_updates = []
         self.global_adapter_state = None  # Aggregated adapter weights
         self.version = 0
 
@@ -62,10 +63,9 @@ class FederatedLearningServiceServicer(
         # Map of client_id to notification queues for update streaming
         self.notification_queues = {}  # {client_id: Queue()}
         self.benchmark = HumanEvalBenchmark()
-        self.benchmark.load_dataset()
 
         if mode == "test":
-            self.benchmark.dataset = self.benchmark.dataset.select(range(1))
+            self.benchmark.dataset = self.benchmark.dataset.select(range(2))
         try:
             self.zk = KazooClient(hosts=zk_hosts)
             self.zk.start()
@@ -78,8 +78,8 @@ class FederatedLearningServiceServicer(
         self.zk.ensure_path("/myapp/clients")
 
         # 4. Create or update a znode for client_id → weight
-        client_id = "client123"
-        weight = 0.42
+        # client_id = "client123"
+        # weight = 0.42
 
         path = f"/myapp/clients/{client_id}"
         data = str(weight).encode("utf-8")
@@ -101,24 +101,28 @@ class FederatedLearningServiceServicer(
             print(f"Weight for {client_id}: {weight}")
         else:
             print(f"No entry for {client_id}")
+            self.update_client_weight(client_id, weight)
 
         return weight
 
-    def weighted_average(self):
+    def weighted_average(self, update_requests, use_pylint=True):
+
+        # Now use the pre-computed weights in the parameter aggregation
         aggregated_state = {}
         for key in self.update_requests[0].update.keys():
             aggregated_state[key] = 0
             total_weight = 0
-            for update_requests in self.update_requests:
-                # allow some zk tolerance
-                if self.zk is not None:
-                    weight = self.get_client_weight(update_requests.client_id)
-                else:
-                    weight = 1
-                aggregated_state[key] += update_requests.update[key] * weight
+
+            for update_request in self.update_requests:
+                client_id = update_request.client_id
+                weight = (
+                    update_request.weight * min(update_request.pylint_score, 0.01) / 10
+                )
+                aggregated_state[key] += update_request.update[key] * weight
                 total_weight += weight
 
             aggregated_state[key] /= total_weight
+
         return aggregated_state
 
     def SubmitUpdate(self, request, context):
@@ -134,11 +138,18 @@ class FederatedLearningServiceServicer(
 
         try:
             decoded_dict = load_safetensors_from_bytes(request.update)
+            if self.zk is not None:
+                weight = self.get_client_weight(client_id)
+            else:
+                weight = 0.5
+                logger.info("zk not available")
             decoded_msg = DecodedModelUpdate(
                 client_id=request.client_id,
                 update=decoded_dict,
                 version=request.version,
                 timestamp=request.timestamp,
+                pylint_score=request.pylint_score,
+                weight=weight,
             )
 
             logger.info(
@@ -175,70 +186,109 @@ class FederatedLearningServiceServicer(
             logger.info("Error in SubmitUpdate:", e)
             return model_update_pb2.Acknowledgement(success=False, message=str(e))
 
+    def perform_eval(self, aggregated_state):
+
+        # Assume all updates have matching keys
+        self.global_adapter_state = aggregated_state
+
+        logger.info("Aggregated global adapter state updated.")
+        round_path = os.path.join(
+            PATH_TO_ADAPTERS,
+            "server",
+            "rounds",
+        )
+        latest_round = find_latest_adapter_version(round_path)
+        updated_round = latest_round + 1
+        output_dir = os.path.join(round_path, f"v{updated_round}")
+        os.makedirs(output_dir, exist_ok=True)
+        save_file(
+            self.global_adapter_state,
+            os.path.join(output_dir, "adapter_model.safetensors"),
+        )
+        shutil.copy2(
+            os.path.join(PATH_TO_ADAPTERS, "adapter_config.json"),
+            os.path.join(output_dir, "adapter_config.json"),
+        )
+
+        code_agent = LoraHuggingFaceAgent(
+            model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
+            adapter_path=output_dir,
+        )
+        result = evaluate(
+            code_agent,
+            self.benchmark,
+            results_csv="experiments.csv",
+            mode="prod",
+        )
+        return result
+
     def _perform_aggregation_and_evaluation(self):
         """Background thread to perform aggregation and evaluation."""
         try:
+            # TODO: this lock too long... probably could split into two locks?
             with self.update_lock:
                 # Check if another thread already processed these updates
                 if len(self.update_requests) < 2:
                     return
 
                 # Perform the aggregation
-                aggregated_state = self.weighted_average()
-                self.update_requests = []  # Reset for the next round
-                # Assume all updates have matching keys
-                self.global_adapter_state = aggregated_state
+                aggregated_state = self.weighted_average(self.update_requests)
 
-            logger.info("Aggregated global adapter state updated.")
-            round_path = os.path.join(
-                PATH_TO_ADAPTERS,
-                "server",
-                "rounds",
-            )
-            latest_round = find_latest_adapter_version(round_path)
-            updated_round = latest_round + 1
-            output_dir = os.path.join(round_path, f"v{updated_round}")
-            os.makedirs(output_dir, exist_ok=True)
-            save_file(
-                self.global_adapter_state,
-                os.path.join(output_dir, "adapter_model.safetensors"),
-            )
-            shutil.copy2(
-                os.path.join(PATH_TO_ADAPTERS, "adapter_config.json"),
-                os.path.join(output_dir, "adapter_config.json"),
-            )
+                # Perform the evaluation
+                result = self.perform_eval(aggregated_state)
+                # TODO: retry logic
+                # implement eval loop and send if good update
+                if not result:
+                    logger.info("initial aggregation failed, trying per client update")
+                    for i, update_subset in enumerate(
+                        self._leave_one_out_batches(self.update_requests)
+                    ):
+                        aggregated_state = self.weighted_average(update_subset)
+                        result = self.perform_eval(aggregated_state)
+                        if result:
+                            # downweight the bad update
+                            client_weight = self.update_requests[i].weight
+                            client_id = self.update_requests[i].client_id
+                            # exponential decay for now
+                            client_weight *= 0.5
+                            self.update_client_weight(client_id, client_weight)
+                            break
+                if result:
+                    main_path = os.path.join(PATH_TO_ADAPTERS, "server", "central")
+                    # get latest version
+                    latest_version = find_latest_adapter_version(main_path)
+                    updated_version = latest_version + 1
+                    output_dir = os.path.join(main_path, f"v{updated_version}")
+                    os.makedirs(output_dir, exist_ok=True)
+                    save_file(
+                        self.global_adapter_state,
+                        os.path.join(output_dir, "adapter_model.safetensors"),
+                    )
+                    self.version = updated_version
+                    # Notify all subscribed clients of the new model
+                    self._notify_clients_of_update()
 
-            code_agent = LoraHuggingFaceAgent(
-                model_name="Qwen/Qwen2.5-Coder-0.5B-Instruct",
-                adapter_path=output_dir,
-            )
-            result = evaluate(
-                code_agent,
-                self.benchmark,
-                results_csv="experiments.csv",
-                mode="prod",
-            )
-            # TODO: retry logic
-            # implement eval loop and send if good update
-            if result:
-                main_path = os.path.join(PATH_TO_ADAPTERS, "server", "central")
-                # get latest version
-                latest_version = find_latest_adapter_version(main_path)
-                updated_version = latest_version + 1
-                output_dir = os.path.join(main_path, f"v{updated_version}")
-                os.makedirs(output_dir, exist_ok=True)
-                save_file(
-                    self.global_adapter_state,
-                    os.path.join(output_dir, "adapter_model.safetensors"),
-                )
-                self.version = updated_version
-                # Notify all subscribed clients of the new model
-                self._notify_clients_of_update()
+                # TODO: retry logic
         except Exception as e:
             import traceback
 
             traceback.print_exc()
             logger.info(f"Error in background aggregation: {e}")
+        finally:
+            self.update_requests = []  # Reset for the next round
+
+    def _leave_one_out_batches(self, updates):
+        """
+        Generator that first yields the full list, then -1 element at a time.
+        For N updates you’ll get 1 + N batches:
+            [0,1,2,3]   → full set
+            [1,2,3]     → drop 0
+            [0,2,3]     → drop 1
+            ...
+        """
+        # yield updates                                  # full set first
+        for i in range(len(updates)):
+            yield updates[:i] + updates[i + 1 :]
 
     def GetAggregatedModel(self, request, context):
         client_id = request.client_id
@@ -425,8 +475,9 @@ def serve():
     except KeyboardInterrupt:
         logger.info("Server shutting down...")
         server.stop(0)
-        server.zk.stop()
-        server.zk.close()
+        if servicer.zk is not None:
+            servicer.zk.stop()
+            servicer.zk.close()
 
 
 if __name__ == "__main__":

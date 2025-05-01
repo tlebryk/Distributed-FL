@@ -8,6 +8,7 @@ message ModelUpdate {
   bytes update = 2;         // Serialized (and optionally compressed) model update payload
   int32 version = 3;        // For version tracking
   int64 timestamp = 4;      // For ordering and verification
+  float pylint_score = 5;        // Weight of this update
 }
 
 // Message sent by the server containing aggregated model

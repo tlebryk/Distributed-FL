@@ -1,7 +1,9 @@
 .PHONY: grpc_update build_server build_client run_server docker_run_client_a docker_run_client_b
 
+# cd distributed_fl
+# pwd
 grpc_update:
-	python -m grpc_tools.protoc -I. --python_out=distributed_fl --grpc_python_out=distributed_fl distributed_fl/model_update.proto
+	uv run python -m grpc_tools.protoc -I=distributed_fl --python_out=distributed_fl --grpc_python_out=distributed_fl distributed_fl/model_update.proto
 
 build_server:
 	docker build -f distributed_fl/Dockerfile.server -t server . --progress=plain
@@ -45,3 +47,6 @@ zookeeper_build:
 
 zookeeper_run:
 	docker run -d --rm --name zk_local -p 2181:2181 my-zk:latest
+
+kazoo_reset:
+	uv run distributed_fl/reset_kazoo.py

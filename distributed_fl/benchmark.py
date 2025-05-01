@@ -18,6 +18,7 @@ class Benchmark(ABC):
     def __init__(self, timeout: int = 5):
         self.timeout = timeout
         self.dataset = None
+        self.load_dataset()
 
     @abstractmethod
     def load_dataset(self):
@@ -267,7 +268,7 @@ class HumanEvalBenchmark(Benchmark):
         task_id = example["task_id"]
         input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.device)
         # %%
-        output_ids = model.generate(input_ids, max_new_tokens=300)
+        output_ids = model.generate(input_ids, max_new_tokens=300, temperature=0.01)
         generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         # %%
         function_name = example["entry_point"]

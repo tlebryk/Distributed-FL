@@ -151,9 +151,7 @@ def train_model(
 
     def formatting_prompts_func(example):
         output_texts = []
-        text = (
-            f"### Question: {example['instruction']}\n ### Answer: {example['output']}"
-        )
+        text = f"{example['instruction']}\n {example['output']}"
         output_texts.append(text)
         return text
 
@@ -167,7 +165,7 @@ def train_model(
     transformers_training_args = SFTConfig(
         output_dir="./tmp",
         gradient_checkpointing=True,
-        num_train_epochs=1,
+        num_train_epochs=2,
         learning_rate=5e-4,
         warmup_ratio=0.05,
         weight_decay=0.01,
