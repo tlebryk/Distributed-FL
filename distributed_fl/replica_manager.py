@@ -17,6 +17,56 @@ logger = get_logger(__name__)
 PATH_TO_ADAPTERS = "./distributed_fl/adapters"
 
 
+def normalize_address(address):
+    """
+    Normalize server addresses to prevent false leader changes
+    when the same server is referenced with different names.
+
+    Converts hostnames like 'host:port' to either 'localhost:port'
+    or 'ip:port' to ensure consistent addressing.
+    """
+    if not address:
+        return address
+
+    parts = address.split(":")
+    if len(parts) != 2:
+        return address  # Not a valid host:port format
+
+    hostname, port = parts
+
+    # Check if this is a local hostname
+    try:
+        import socket
+
+        local_hostname = socket.gethostname()
+
+        # If this matches the local machine, use localhost
+        if hostname == local_hostname:
+            return f"localhost:{port}"
+
+        # Try to resolve the hostname
+        try:
+            ip = socket.gethostbyname(hostname)
+
+            # Check if it's a loopback address (127.x.x.x)
+            if ip.startswith("127."):
+                return f"localhost:{port}"
+
+            # Check if it's one of this machine's IP addresses
+            for addr_info in socket.getaddrinfo(local_hostname, None):
+                if addr_info[4][0] == ip:
+                    return f"localhost:{port}"
+
+            # Otherwise return the IP form for consistency
+            return f"{ip}:{port}"
+        except socket.gaierror:
+            # Can't resolve hostname, return as is
+            return address
+    except:
+        # If any error occurs, return the original address
+        return address
+
+
 class ReplicaManager:
     """Manages a replica server that syncs with a leader server."""
 
@@ -91,9 +141,8 @@ class ReplicaManager:
             # Create leader path if needed
             self.zk_manager.zk.ensure_path("/myapp/leader")
 
-            # Encode the hostname:port as the leader address
-            hostname = socket.gethostname()
-            leader_data = f"{hostname}:{self.server_port}".encode("utf-8")
+            # Always use localhost:port format for consistency
+            leader_data = f"localhost:{self.server_port}".encode("utf-8")
 
             # Set leader info
             if self.zk_manager.zk.exists("/myapp/leader/current"):
@@ -102,8 +151,9 @@ class ReplicaManager:
                 self.zk_manager.zk.create("/myapp/leader/current", leader_data)
 
             logger.info(
-                f"Registered as leader with address {hostname}:{self.server_port}"
+                f"Registered as leader with address localhost:{self.server_port}"
             )
+            return True
 
     def _discover_leader(self):
         """Check if leader has changed and update connection if needed."""
@@ -118,29 +168,65 @@ class ReplicaManager:
                 leader_data, _ = self.zk_manager.zk.get("/myapp/leader/current")
                 new_leader_address = leader_data.decode("utf-8")
 
-                # Check if leader address has changed
-                if new_leader_address != self.leader_address:
+                # Normalize both addresses to prevent false detection of changes
+                normalized_current = normalize_address(self.leader_address)
+                normalized_new = normalize_address(new_leader_address)
+
+                # Check if leader address has meaningfully changed
+                if normalized_new != normalized_current:
                     logger.info(
-                        f"Discovered new leader at {new_leader_address} (old: {self.leader_address})"
+                        f"Discovered potential new leader at {new_leader_address} (old: {self.leader_address})"
                     )
 
-                    # Close existing connection
-                    if self.channel:
-                        self.channel.close()
+                    # Test the new connection BEFORE closing the old one
+                    try:
+                        test_channel = grpc.insecure_channel(new_leader_address)
+                        test_stub = model_update_pb2_grpc.FederatedLearningServiceStub(
+                            test_channel
+                        )
 
-                    # Update leader address
-                    self.leader_address = new_leader_address
+                        # Try a simple heartbeat to verify the connection works
+                        heartbeat_request = model_update_pb2.HeartbeatRequest(
+                            sender_id=f"replica_{self.replica_id}",
+                            timestamp=int(time.time()),
+                        )
 
-                    # Create new connection
-                    self.channel = grpc.insecure_channel(self.leader_address)
-                    self.stub = model_update_pb2_grpc.FederatedLearningServiceStub(
-                        self.channel
-                    )
+                        # Use a short timeout to avoid hanging
+                        response = test_stub.SendHeartbeat(heartbeat_request, timeout=3)
 
-                    logger.info(
-                        f"Updated connection to new leader at {self.leader_address}"
-                    )
-                    return True
+                        if response.alive:
+                            logger.info(
+                                f"Successfully verified new leader connection to {new_leader_address}"
+                            )
+
+                            # Now that we've verified the new connection works, close the old one
+                            if self.channel:
+                                self.channel.close()
+
+                            # Update leader address
+                            self.leader_address = new_leader_address
+
+                            # Create new connection
+                            self.channel = test_channel  # Reuse the test channel we already verified
+                            self.stub = test_stub
+
+                            logger.info(
+                                f"Updated connection to new leader at {self.leader_address}"
+                            )
+                            return True
+                        else:
+                            logger.warning(
+                                f"New leader at {new_leader_address} responded but reports not alive"
+                            )
+                            test_channel.close()
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to connect to potential new leader at {new_leader_address}: {e}"
+                        )
+                        return False
+            else:
+                # Addresses are equivalent after normalization
+                return False
         except Exception as e:
             logger.error(f"Error discovering leader: {e}")
 
@@ -490,7 +576,7 @@ class ReplicaManager:
         try:
             consecutive_failures = 0
             max_consecutive_failures = 3  # Number of consecutive checks before takeover
-            check_interval = 10  # Seconds between leadership checks
+            check_interval = 3  # Seconds between leadership checks
 
             while self.running:
                 time.sleep(check_interval)

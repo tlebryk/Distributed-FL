@@ -33,6 +33,56 @@ logger = get_logger(__name__)
 PATH_TO_ADAPTERS = "./distributed_fl/adapters"
 
 
+def normalize_address(address):
+    """
+    Normalize server addresses to prevent false leader changes
+    when the same server is referenced with different names.
+
+    Converts hostnames like 'host:port' to either 'localhost:port'
+    or 'ip:port' to ensure consistent addressing.
+    """
+    if not address:
+        return address
+
+    parts = address.split(":")
+    if len(parts) != 2:
+        return address  # Not a valid host:port format
+
+    hostname, port = parts
+
+    # Check if this is a local hostname
+    try:
+        import socket
+
+        local_hostname = socket.gethostname()
+
+        # If this matches the local machine, use localhost
+        if hostname == local_hostname:
+            return f"localhost:{port}"
+
+        # Try to resolve the hostname
+        try:
+            ip = socket.gethostbyname(hostname)
+
+            # Check if it's a loopback address (127.x.x.x)
+            if ip.startswith("127."):
+                return f"localhost:{port}"
+
+            # Check if it's one of this machine's IP addresses
+            for addr_info in socket.getaddrinfo(local_hostname, None):
+                if addr_info[4][0] == ip:
+                    return f"localhost:{port}"
+
+            # Otherwise return the IP form for consistency
+            return f"{ip}:{port}"
+        except socket.gaierror:
+            # Can't resolve hostname, return as is
+            return address
+    except:
+        # If any error occurs, return the original address
+        return address
+
+
 class DecodedModelUpdate(NamedTuple):
     client_id: str
     update: Dict[str, Any]
@@ -350,6 +400,58 @@ class FederatedLearningServiceServicer(
             status="healthy",  # Simple status - could be "healthy", "degraded", etc.
         )
 
+    # New method for leader status
+    def CheckLeaderStatus(self, request, context):
+        """
+        Check if this server is the current leader.
+        Redirects clients to the current leader if this server is not the leader.
+        """
+        client_id = request.client_id
+
+        # Update client's last seen timestamp
+        if client_id in self.connected_clients:
+            self.connected_clients[client_id]["last_seen"] = time.time()
+
+        # Check if we're in leader mode - if so, we're the leader!
+        if self.mode == "leader":
+            # We are the leader, return our own address
+            return model_update_pb2.RedirectResponse(
+                new_leader_address="",  # Empty means we are the leader
+                current_version=self.version,
+                message="This server is the current leader",
+            )
+
+        # If we're a replica but were asked directly, try to redirect to the current leader
+        try:
+            # Get current leader from ZooKeeper
+            if self.zk_manager.zk and self.zk_manager.zk.exists(
+                "/myapp/leader/current"
+            ):
+                leader_data, _ = self.zk_manager.zk.get("/myapp/leader/current")
+                current_leader = leader_data.decode("utf-8")
+
+                return model_update_pb2.RedirectResponse(
+                    new_leader_address=current_leader,
+                    current_version=self.version,
+                    message=f"Please connect to the current leader at {current_leader}",
+                )
+            else:
+                # No leader information available
+                return model_update_pb2.RedirectResponse(
+                    new_leader_address="",
+                    current_version=0,
+                    message="No leader information available",
+                )
+        except Exception as e:
+            logger.error(f"Error in CheckLeaderStatus: {e}")
+            context.set_details(str(e))
+            context.set_code(grpc.StatusCode.INTERNAL)
+            return model_update_pb2.RedirectResponse(
+                new_leader_address="",
+                current_version=0,
+                message=f"Error determining leader: {str(e)}",
+            )
+
 
 def cleanup_disconnected_clients(servicer):
     """Remove clients that haven't been seen for more than 5 minutes"""
@@ -378,9 +480,8 @@ def register_leader_in_zk(zk_manager, port):
             # Create leader path if needed
             zk_manager.zk.ensure_path("/myapp/leader")
 
-            # Encode the hostname:port as the leader address
-            hostname = socket.gethostname()
-            leader_data = f"{hostname}:{port}".encode("utf-8")
+            # Always use localhost for leader registration to prevent hostname issues
+            leader_data = f"localhost:{port}".encode("utf-8")
 
             # Set leader info
             if zk_manager.zk.exists("/myapp/leader/current"):
@@ -388,7 +489,7 @@ def register_leader_in_zk(zk_manager, port):
             else:
                 zk_manager.zk.create("/myapp/leader/current", leader_data)
 
-            logger.info(f"Registered as leader with address {hostname}:{port}")
+            logger.info(f"Registered as leader with address localhost:{port}")
             return True
         except Exception as e:
             logger.error(f"Error registering as leader: {e}")

@@ -59,6 +59,13 @@ message HeartbeatResponse {
   string status = 3;
 }
 
+// Response for graceful redirection to new leader
+message RedirectResponse {
+  string new_leader_address = 1;
+  int32 current_version = 2;
+  string message = 3;
+}
+
 // Extended service definition
 service FederatedLearningService {
   // Existing RPCs
@@ -69,6 +76,7 @@ service FederatedLearningService {
   rpc ConnectClient(ClientConnection) returns (ModelVersionInfo);
   rpc SubscribeToUpdates(ClientRequest) returns (stream UpdateNotification);
   
-  // New heartbeat RPC
+  // Heartbeat and leader status RPCs
   rpc SendHeartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc CheckLeaderStatus(ClientRequest) returns (RedirectResponse);
 }
