@@ -47,15 +47,101 @@ def serialize_state_dict(state_dict):
 
 
 class FederatedClient:
-    def __init__(self, client_id, server_address="localhost:50051"):
+    def __init__(
+        self, client_id, server_address="localhost:50051", fallback_addresses=None
+    ):
         self.client_id = client_id
         self.server_address = server_address
+        # Default fallback addresses if none provided
+        self.fallback_addresses = fallback_addresses or []
         self.current_version = 0
-        self.channel = grpc.insecure_channel(server_address)
-        self.stub = model_update_pb2_grpc.FederatedLearningServiceStub(self.channel)
+        self.channel = None
+        self.stub = None
+        self.initialize_connection()
         self.initialize_agent()
         self.running = True
         self.lock = threading.Lock()
+
+    def initialize_connection(self):
+        """Initialize or reinitialize the gRPC connection to the server."""
+        if self.channel:
+            self.channel.close()
+
+        logger.info(f"Connecting to server at {self.server_address}")
+        self.channel = grpc.insecure_channel(self.server_address, options=CHANNEL_OPTS)
+        self.stub = model_update_pb2_grpc.FederatedLearningServiceStub(self.channel)
+
+    def update_server_address(self, new_address):
+        """Update the server address and reconnect."""
+        if new_address and new_address != self.server_address:
+            logger.info(
+                f"Updating server address from {self.server_address} to {new_address}"
+            )
+            self.server_address = new_address
+            self.initialize_connection()
+            return True
+        return False
+
+    def try_fallback_servers(self):
+        """Try connecting to fallback servers when primary connection fails."""
+        if not self.fallback_addresses:
+            logger.warning("No fallback addresses configured")
+            return False
+
+        # Store original address to restore if all fallbacks fail
+        original_address = self.server_address
+
+        for address in self.fallback_addresses:
+            if address == original_address:
+                continue  # Skip the current address
+
+            logger.info(f"Trying fallback server at {address}")
+            self.update_server_address(address)
+
+            try:
+                # Try a simple heartbeat check to see if this server is alive
+                request = model_update_pb2.HeartbeatRequest(
+                    sender_id=self.client_id, timestamp=int(time.time())
+                )
+                response = self.stub.SendHeartbeat(request, timeout=3)
+
+                if response.alive:
+                    logger.info(
+                        f"Successfully connected to fallback server at {address}"
+                    )
+                    return True
+            except Exception as e:
+                logger.warning(f"Fallback server at {address} unavailable: {e}")
+
+        # If we get here, all fallbacks failed
+        logger.error("All fallback servers unavailable")
+
+        # Restore original address
+        self.update_server_address(original_address)
+        return False
+
+    def check_connection(self, max_retries=2):
+        """Check current connection and try fallbacks if needed."""
+        for attempt in range(max_retries):
+            try:
+                # Try a simple heartbeat to check connection
+                request = model_update_pb2.HeartbeatRequest(
+                    sender_id=self.client_id, timestamp=int(time.time())
+                )
+                response = self.stub.SendHeartbeat(request, timeout=3)
+                if response.alive:
+                    return True
+            except Exception as e:
+                logger.warning(f"Connection check failed (attempt {attempt+1}): {e}")
+
+                # Try fallback servers
+                if self.try_fallback_servers():
+                    return True
+
+                # Small delay before retry
+                time.sleep(1)
+
+        return False
 
     def initialize_agent(
         self, model_id="Qwen/Qwen2.5-Coder-0.5B-Instruct", adapter_path=None
@@ -71,158 +157,242 @@ class FederatedClient:
             model_name=model_id, adapter_path=adapter_path
         )
 
-    def connect_to_server(self):
+    def connect_to_server(self, max_retries=3):
         """Establish connection with the server and update model if necessary."""
-        try:
-            connect_request = model_update_pb2.ClientConnection(
-                client_id=self.client_id,
-                current_version=self.current_version,
-                ready_for_training=True,
-            )
+        retries = 0
 
-            version_info = self.stub.ConnectClient(connect_request)
-            logger.info(
-                f"Connected to server. Latest version: {version_info.latest_version}"
-            )
+        while retries < max_retries:
+            try:
+                # Check if current connection is working
+                if retries > 0 and not self.check_connection():
+                    logger.warning(
+                        "Server connection failed, trying fallback servers..."
+                    )
+                    if not self.try_fallback_servers():
+                        retries += 1
+                        time.sleep(2)
+                        continue
 
-            if version_info.update_available and version_info.model_state:
-                with self.lock:
-                    self.current_version = version_info.latest_version
-                    logger.info(
-                        f"Received newer model (version {self.current_version})"
-                    )
-                    decoded_dict = load_safetensors_from_bytes(version_info.model_state)
-                    # save the dict to a safetensors file
-                    path_dir = os.path.join(
-                        PATH_TO_ADAPTERS,
-                        "client",
-                        "central",
-                        f"v{version_info.latest_version}",
-                    )
-                    os.makedirs(path_dir, exist_ok=True)
-                    save_file(
-                        decoded_dict,
-                        os.path.join(
-                            path_dir,
-                            "adapter_model.safetensors",
-                        ),
-                    )
-                    shutil.copy2(
-                        os.path.join(PATH_TO_ADAPTERS, "adapter_config.json"),
-                        os.path.join(
-                            path_dir,
-                            "adapter_config.json",
-                        ),
-                    )
-                    self.agent.model.load_state_dict(decoded_dict, strict=False)
-                    logger.info("Updated local model with latest adapter state")
-            return True
-        except Exception as e:
-            traceback.print_exc()
-            logger.info(f"Error connecting to server: {e}")
-            return False
+                # Now proceed with regular connection
+                connect_request = model_update_pb2.ClientConnection(
+                    client_id=self.client_id,
+                    current_version=self.current_version,
+                    ready_for_training=True,
+                )
+
+                version_info = self.stub.ConnectClient(connect_request)
+                logger.info(
+                    f"Connected to server at {self.server_address}. Latest version: {version_info.latest_version}"
+                )
+
+                if version_info.update_available and version_info.model_state:
+                    with self.lock:
+                        self.current_version = version_info.latest_version
+                        logger.info(
+                            f"Received newer model (version {self.current_version})"
+                        )
+                        decoded_dict = load_safetensors_from_bytes(
+                            version_info.model_state
+                        )
+                        # save the dict to a safetensors file
+                        path_dir = os.path.join(
+                            PATH_TO_ADAPTERS,
+                            "client",
+                            "central",
+                            f"v{version_info.latest_version}",
+                        )
+                        os.makedirs(path_dir, exist_ok=True)
+                        save_file(
+                            decoded_dict,
+                            os.path.join(
+                                path_dir,
+                                "adapter_model.safetensors",
+                            ),
+                        )
+                        shutil.copy2(
+                            os.path.join(PATH_TO_ADAPTERS, "adapter_config.json"),
+                            os.path.join(
+                                path_dir,
+                                "adapter_config.json",
+                            ),
+                        )
+                        self.agent.model.load_state_dict(decoded_dict, strict=False)
+                        logger.info("Updated local model with latest adapter state")
+                return True
+            except Exception as e:
+                logger.warning(f"Connection attempt {retries+1} failed: {e}")
+                retries += 1
+
+                # Try fallback servers if primary connection failed
+                if retries <= 1:  # Only try fallbacks on first retry
+                    logger.info("Trying fallback servers...")
+                    if self.try_fallback_servers():
+                        continue
+
+                # Wait before retrying
+                time.sleep(2)
+
+        logger.error(f"Failed to connect to server after {max_retries} attempts")
+        return False
 
     def subscribe_to_updates(self):
         """Listen for model update notifications from the server."""
 
         def update_listener():
-            try:
-                subscription_request = model_update_pb2.ClientRequest(
-                    client_id=self.client_id, current_version=self.current_version
-                )
-                for notification in self.stub.SubscribeToUpdates(subscription_request):
-                    if not self.running:
-                        break
-                    logger.info(
-                        f"Update notification: New version {notification.new_version} available"
+            while self.running:
+                try:
+                    # Check if connection is alive
+                    if not self.check_connection():
+                        logger.warning(
+                            "Lost connection to server. Trying to reconnect..."
+                        )
+                        if not self.connect_to_server():
+                            logger.error(
+                                "Failed to reconnect to server. Retrying in 10 seconds..."
+                            )
+                            time.sleep(10)
+                            continue
+
+                    subscription_request = model_update_pb2.ClientRequest(
+                        client_id=self.client_id, current_version=self.current_version
                     )
-                    with self.lock:
-                        if notification.new_version > self.current_version:
-                            self.get_latest_model()
-            except Exception as e:
-                if self.running:
-                    logger.info(f"Update subscription error: {e}")
-                    logger.info("Attempting to reconnect in 10 seconds...")
-                    time.sleep(10)
+                    for notification in self.stub.SubscribeToUpdates(
+                        subscription_request
+                    ):
+                        if not self.running:
+                            break
+                        logger.info(
+                            f"Update notification: New version {notification.new_version} available"
+                        )
+                        with self.lock:
+                            if notification.new_version > self.current_version:
+                                self.get_latest_model()
+
+                    # If we exit the loop normally, there was likely a disconnection
                     if self.running:
-                        self.subscribe_to_updates()
+                        logger.warning(
+                            "Update subscription ended unexpectedly. Reconnecting..."
+                        )
+                        time.sleep(5)
+
+                except Exception as e:
+                    if self.running:
+                        logger.warning(f"Update subscription error: {e}")
+                        logger.info("Attempting to reconnect in 10 seconds...")
+                        time.sleep(10)
 
         listener_thread = threading.Thread(target=update_listener, daemon=True)
         listener_thread.start()
         return listener_thread
 
-    def get_latest_model(self):
+    def get_latest_model(self, max_retries=3):
         """Request the latest aggregated model from the server."""
-        try:
-            client_request = model_update_pb2.ClientRequest(
-                client_id=self.client_id, current_version=self.current_version
-            )
-            aggregated = self.stub.GetAggregatedModel(client_request)
-            if aggregated.model_state:
-                logger.info(
-                    f"Received model state of length {len(aggregated.model_state)}"
-                )
-                logger.info("Successfully loaded adapter state")
-                adapter_state = load_safetensors_from_bytes(aggregated.model_state)
-                self.agent.model.load_state_dict(adapter_state, strict=False)
-                logger.info("Successfully loaded adapter state into model")
-                version_dir = os.path.join(
-                    PATH_TO_ADAPTERS, "client", "central", f"v{aggregated.version}"
-                )
-                os.makedirs(version_dir, exist_ok=True)
-                logger.info(f"Saving adapter state to {version_dir}")
-                self.save_adapter_to_disk(version_dir, aggregated.version)
-                shutil.copy2(
-                    os.path.join(PATH_TO_ADAPTERS, "adapter_config.json"),
-                    os.path.join(version_dir, "adapter_config.json"),
-                )
-                self.current_version = aggregated.version
-                logger.info(f"Updated model to version {self.current_version}")
-                return True
-            else:
-                logger.info("No model state received or no newer model available")
-                return False
-        except Exception as e:
-            logger.info(f"Error getting latest model: {e}")
-            return False
+        retries = 0
 
-    def train_and_submit(self, mode="debug", code_path="./data"):
-        """Simulate training and submit local update to the server."""
-        try:
-            logger.info("Training local model...")
-            with self.lock:
-                update_payload, pylint_score = self.get_adapter_update(self.agent)
-                if mode == "debug":
-                    payload_size_bytes = len(update_payload)
-                    payload_size_kb = payload_size_bytes / 1024
-                    payload_size_mb = payload_size_kb / 1024
+        while retries < max_retries:
+            try:
+                # Check if connection is alive
+                if retries > 0 and not self.check_connection():
+                    logger.warning("Connection to server lost. Trying to reconnect...")
+                    if not self.connect_to_server():
+                        retries += 1
+                        time.sleep(2)
+                        continue
+
+                client_request = model_update_pb2.ClientRequest(
+                    client_id=self.client_id, current_version=self.current_version
+                )
+                aggregated = self.stub.GetAggregatedModel(client_request)
+
+                if aggregated.model_state:
                     logger.info(
-                        f"Update payload size: {payload_size_bytes:,} bytes ({payload_size_kb:.2f} KB, {payload_size_mb:.4f} MB)"
+                        f"Received model state of length {len(aggregated.model_state)}"
                     )
-
-                current_ver = self.current_version
-                update_message = model_update_pb2.ModelUpdate(
-                    client_id=self.client_id,
-                    update=update_payload,
-                    version=current_ver,
-                    timestamp=int(time.time()),
-                    pylint_score=pylint_score,
-                )
-                logger.info(f"Submitting update to server (version: {current_ver})...")
-                ack = self.stub.SubmitUpdate(update_message)
-                logger.info(f"SubmitUpdate result: {ack.message}")
-
-                if not ack.success and "outdated model" in ack.message:
-                    logger.info("Server rejected update due to outdated model.")
-                    self.get_latest_model()
+                    logger.info("Successfully loaded adapter state")
+                    adapter_state = load_safetensors_from_bytes(aggregated.model_state)
+                    self.agent.model.load_state_dict(adapter_state, strict=False)
+                    logger.info("Successfully loaded adapter state into model")
+                    version_dir = os.path.join(
+                        PATH_TO_ADAPTERS, "client", "central", f"v{aggregated.version}"
+                    )
+                    os.makedirs(version_dir, exist_ok=True)
+                    logger.info(f"Saving adapter state to {version_dir}")
+                    self.save_adapter_to_disk(version_dir, aggregated.version)
+                    shutil.copy2(
+                        os.path.join(PATH_TO_ADAPTERS, "adapter_config.json"),
+                        os.path.join(version_dir, "adapter_config.json"),
+                    )
+                    self.current_version = aggregated.version
+                    logger.info(f"Updated model to version {self.current_version}")
+                    return True
+                else:
+                    logger.info("No model state received or no newer model available")
                     return False
-                return ack.success
-        except Exception as e:
-            import traceback
 
-            logger.info(f"Error in training and submitting update: {e}")
-            traceback.print_exc()
-            return False
+            except Exception as e:
+                logger.warning(f"Error getting latest model (attempt {retries+1}): {e}")
+                retries += 1
+                time.sleep(2)
+
+        logger.error(f"Failed to get latest model after {max_retries} attempts")
+        return False
+
+    def train_and_submit(self, mode="debug", code_path="./data", max_retries=3):
+        """Simulate training and submit local update to the server."""
+        retries = 0
+
+        while retries < max_retries:
+            try:
+                # Check if connection is alive
+                if retries > 0 and not self.check_connection():
+                    logger.warning("Connection to server lost. Trying to reconnect...")
+                    if not self.connect_to_server():
+                        retries += 1
+                        time.sleep(2)
+                        continue
+
+                logger.info("Training local model...")
+                with self.lock:
+                    update_payload, pylint_score = self.get_adapter_update(
+                        self.agent, code_path
+                    )
+                    if mode == "debug":
+                        payload_size_bytes = len(update_payload)
+                        payload_size_kb = payload_size_bytes / 1024
+                        payload_size_mb = payload_size_kb / 1024
+                        logger.info(
+                            f"Update payload size: {payload_size_bytes:,} bytes ({payload_size_kb:.2f} KB, {payload_size_mb:.4f} MB)"
+                        )
+
+                    current_ver = self.current_version
+                    update_message = model_update_pb2.ModelUpdate(
+                        client_id=self.client_id,
+                        update=update_payload,
+                        version=current_ver,
+                        timestamp=int(time.time()),
+                        pylint_score=pylint_score,
+                    )
+                    logger.info(
+                        f"Submitting update to server (version: {current_ver})..."
+                    )
+                    ack = self.stub.SubmitUpdate(update_message)
+                    logger.info(f"SubmitUpdate result: {ack.message}")
+
+                    if not ack.success and "outdated model" in ack.message:
+                        logger.info("Server rejected update due to outdated model.")
+                        self.get_latest_model()
+                        return False
+                    return ack.success
+
+            except Exception as e:
+                logger.warning(
+                    f"Error in training and submitting update (attempt {retries+1}): {e}"
+                )
+                retries += 1
+                time.sleep(2)
+
+        logger.error(f"Failed to train and submit update after {max_retries} attempts")
+        return False
 
     def get_adapter_update(self, agent, code_path="./data"):
         """
@@ -264,16 +434,18 @@ class FederatedClient:
         """Main training loop with periodic update submissions."""
         try:
             while self.running:
-                self.train_and_submit(code_path=code_path)
+                success = self.train_and_submit(code_path=code_path)
+                if not success:
+                    logger.warning("Training and update submission failed. Will retry.")
                 time.sleep(interval)
         except KeyboardInterrupt:
             self.shutdown()
         except Exception as e:
-            logger.info(f"Training loop error: {e}")
+            logger.error(f"Training loop error: {e}")
             if self.running:
                 logger.info("Restarting training loop...")
                 time.sleep(5)
-                self.run_training_loop(interval)
+                self.run_training_loop(interval, code_path)
 
     def shutdown(self):
         """Cleanly shut down the client."""
@@ -340,26 +512,6 @@ class FederatedClient:
         with open(os.path.join(version_dir, "metadata.json"), "w") as f:
             json.dump(metadata, f, indent=2)
 
-        # Create empty adapter.json file (or save actual config if available)
-        # with open(os.path.join(version_dir, "adapter.json"), "w") as f:
-        #     if hasattr(self.agent.model, "peft_config") and self.agent.model.peft_config:
-        #         # If we have actual config, save it
-        #         json.dump(self.agent.model.peft_config, f, indent=2)
-        #     else:
-        #         # Otherwise create an empty JSON object
-        #         json.dump({}, f)
-
-        # Update symlink to point to latest version
-        # if create_symlink:
-
-        #     latest_link = os.path.join(PATH_TO_ADAPTERS, "client", "central", "latest")
-        #     if os.path.exists(latest_link):
-        #         if os.path.islink(latest_link):
-        #             os.unlink(latest_link)
-        #         else:
-        #             shutil.rmtree(latest_link)
-        #     os.symlink(f"v{version}", latest_link, target_is_directory=True)
-
         logger.info(f"Saved adapter version {version} to {version_dir}")
         return version_dir
 
@@ -367,24 +519,67 @@ class FederatedClient:
 def run(
     client_id="client_1",
     server_address="localhost:50051",
-    interval=10,
+    fallback_addresses=None,
+    interval=3,
     code_path="./data",
 ):
     """
     Create and run the FederatedClient. The function accepts keyword arguments
     for customization.
-    """
-    client = FederatedClient(client_id=client_id, server_address=server_address)
-    if not client.connect_to_server():
-        logger.info("Failed to connect to server. Exiting.")
-        return
 
+    Args:
+        client_id: Unique identifier for this client
+        server_address: Primary server address in format host:port
+        fallback_addresses: List of fallback server addresses to try if primary fails
+        interval: Interval (in seconds) between training submissions
+        code_path: Path to the code directory
+    """
+    # Default fallback servers if none provided (will be empty list if None)
+    if fallback_addresses is None:
+        # Generate fallback addresses based on common replica ports
+        base_parts = server_address.split(":")
+        if len(base_parts) == 2:
+            host = base_parts[0]
+            port = int(base_parts[1])
+            # Create fallbacks with incrementing port numbers
+            fallback_addresses = [f"{host}:{port+i}" for i in range(1, 4)]
+            logger.info(
+                f"Using auto-generated fallback addresses: {fallback_addresses}"
+            )
+
+    # Create the client with the initial server address and fallbacks
+    client = FederatedClient(
+        client_id=client_id,
+        server_address=server_address,
+        fallback_addresses=fallback_addresses,
+    )
+
+    # Try to connect to the server
+    max_retries = 5
+    for attempt in range(max_retries):
+        if client.connect_to_server():
+            logger.info(f"Successfully connected to server at {client.server_address}")
+            break
+        else:
+            if attempt < max_retries - 1:
+                logger.warning(f"Connection attempt {attempt+1} failed. Retrying...")
+                time.sleep(5)
+            else:
+                logger.error(
+                    f"Failed to connect after {max_retries} attempts. Exiting."
+                )
+                return
+
+    # Start the update subscription
     update_thread = client.subscribe_to_updates()
+
     try:
+        # Run the main training loop
         client.run_training_loop(interval=interval, code_path=code_path)
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
     finally:
+        # Clean shutdown
         client.shutdown()
         update_thread.join(timeout=2)
 
@@ -405,7 +600,13 @@ def parse_args():
         "--server_address",
         type=str,
         default="localhost:50051",
-        help="Server address in format host:port",
+        help="Primary server address in format host:port",
+    )
+    parser.add_argument(
+        "--fallback_addresses",
+        type=str,
+        nargs="*",  # Accept multiple values or none
+        help="List of fallback server addresses to try if primary fails (e.g., localhost:50052 localhost:50053)",
     )
     parser.add_argument(
         "--interval",
@@ -425,4 +626,10 @@ def parse_args():
 # %%
 if __name__ == "__main__":
     args = parse_args()
-    run(**vars(args))
+    run(
+        client_id=args.client_id,
+        server_address=args.server_address,
+        fallback_addresses=args.fallback_addresses,
+        interval=args.interval,
+        code_path=args.code_path,
+    )
