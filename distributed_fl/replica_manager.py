@@ -3,12 +3,14 @@ import time
 import threading
 import grpc
 import shutil
-from typing import Optional
+import socket
+from typing import Optional, List, Dict
 import model_update_pb2
 import model_update_pb2_grpc
 from safetensors.torch import save_file, load_file
 from utils import load_safetensors_from_bytes, find_latest_adapter_version
 from logger import get_logger
+from zk_manager import ZKManager
 
 logger = get_logger(__name__)
 
@@ -22,12 +24,15 @@ class ReplicaManager:
         self,
         replica_id: str,
         leader_address: str,
+        server_port: int,
         adapters_path: str = PATH_TO_ADAPTERS,
         heartbeat_interval: int = 5,
         max_missed_heartbeats: int = 3,
+        zk_hosts: str = "127.0.0.1:2181",
     ):
         self.replica_id = replica_id
         self.leader_address = leader_address
+        self.server_port = server_port  # Store port for election
         self.path_to_adapters = adapters_path
         self.current_version = 0
         self.running = True
@@ -43,6 +48,12 @@ class ReplicaManager:
         self.channel = grpc.insecure_channel(leader_address)
         self.stub = model_update_pb2_grpc.FederatedLearningServiceStub(self.channel)
 
+        # ZooKeeper for simple coordination
+        self.zk_manager = ZKManager(hosts=zk_hosts)
+
+        # Register this replica with ZooKeeper
+        self._register_replica()
+
         # Make sure directories exist
         self.replica_model_path = os.path.join(
             self.path_to_adapters, "replica", "models"
@@ -52,6 +63,126 @@ class ReplicaManager:
         # Check if we have any existing models
         self.current_version = find_latest_adapter_version(self.replica_model_path)
         logger.info(f"Initialized replica with model version {self.current_version}")
+
+    def _register_replica(self):
+        """Register this replica in ZooKeeper for election purposes."""
+        if self.zk_manager.zk:
+            # Create a replicas directory if it doesn't exist
+            self.zk_manager.zk.ensure_path("/myapp/replicas")
+
+            # Register this replica with its port number
+            replica_path = f"/myapp/replicas/{self.server_port}"
+            if not self.zk_manager.zk.exists(replica_path):
+                self.zk_manager.zk.create(
+                    replica_path,
+                    str(self.replica_id).encode("utf-8"),
+                    ephemeral=True,  # This node disappears if the replica crashes
+                )
+                logger.info(f"Registered replica in ZooKeeper: {replica_path}")
+            else:
+                self.zk_manager.zk.set(
+                    replica_path, str(self.replica_id).encode("utf-8")
+                )
+                logger.info(f"Updated replica in ZooKeeper: {replica_path}")
+
+    def _register_as_leader(self):
+        """Register this server as the current leader in ZooKeeper."""
+        if self.zk_manager.zk:
+            # Create leader path if needed
+            self.zk_manager.zk.ensure_path("/myapp/leader")
+
+            # Encode the hostname:port as the leader address
+            hostname = socket.gethostname()
+            leader_data = f"{hostname}:{self.server_port}".encode("utf-8")
+
+            # Set leader info
+            if self.zk_manager.zk.exists("/myapp/leader/current"):
+                self.zk_manager.zk.set("/myapp/leader/current", leader_data)
+            else:
+                self.zk_manager.zk.create("/myapp/leader/current", leader_data)
+
+            logger.info(
+                f"Registered as leader with address {hostname}:{self.server_port}"
+            )
+
+    def _discover_leader(self):
+        """Check if leader has changed and update connection if needed."""
+        if not self.zk_manager.zk:
+            logger.warning("No ZooKeeper connection for leader discovery")
+            return False
+
+        try:
+            # Check if leader info exists
+            if self.zk_manager.zk.exists("/myapp/leader/current"):
+                # Get current leader address from ZooKeeper
+                leader_data, _ = self.zk_manager.zk.get("/myapp/leader/current")
+                new_leader_address = leader_data.decode("utf-8")
+
+                # Check if leader address has changed
+                if new_leader_address != self.leader_address:
+                    logger.info(
+                        f"Discovered new leader at {new_leader_address} (old: {self.leader_address})"
+                    )
+
+                    # Close existing connection
+                    if self.channel:
+                        self.channel.close()
+
+                    # Update leader address
+                    self.leader_address = new_leader_address
+
+                    # Create new connection
+                    self.channel = grpc.insecure_channel(self.leader_address)
+                    self.stub = model_update_pb2_grpc.FederatedLearningServiceStub(
+                        self.channel
+                    )
+
+                    logger.info(
+                        f"Updated connection to new leader at {self.leader_address}"
+                    )
+                    return True
+        except Exception as e:
+            logger.error(f"Error discovering leader: {e}")
+
+        return False
+
+    def _elect_leader(self) -> bool:
+        """
+        Simple deterministic leader election.
+        Returns True if this replica should become the leader.
+        """
+        if not self.zk_manager.zk:
+            logger.warning("No ZooKeeper connection, assuming leadership by default")
+            return True
+
+        try:
+            # Get all registered replicas
+            replicas = self.zk_manager.zk.get_children("/myapp/replicas")
+            if not replicas:
+                logger.warning("No replicas found in ZooKeeper")
+                return True
+
+            # Convert to integers (port numbers)
+            replica_ports = [int(port) for port in replicas]
+
+            # Sort ports to find the lowest
+            replica_ports.sort()
+
+            # Check if this replica has the lowest port
+            if replica_ports[0] == self.server_port:
+                logger.info(
+                    f"This replica (port {self.server_port}) has the lowest port number and will become leader"
+                )
+                return True
+            else:
+                logger.info(
+                    f"Replica with port {replica_ports[0]} should become the leader (our port: {self.server_port})"
+                )
+                return False
+        except Exception as e:
+            logger.error(f"Error in leader election: {e}")
+            # In case of error, default to taking over
+            return True
 
     def connect_to_leader(self) -> bool:
         """Connect to the leader server and check for model updates."""
@@ -180,8 +311,7 @@ class ReplicaManager:
                 )
             self.missed_heartbeats = 0
             self.leader_is_alive = True
-            # TODO: turn to debug
-            logger.info("Heartbeat to leader successful")
+
             # Check if there's a newer version available
             if response.current_version > self.current_version:
                 logger.info(
@@ -204,27 +334,18 @@ class ReplicaManager:
                     f"Leader considered down after {self.missed_heartbeats} missed heartbeats"
                 )
 
-                # Here you would trigger leadership takeover if implemented
-                # self._assume_leadership()
-
             return False
-
-    # Add this method to the ReplicaManager class
 
     def _assume_leadership(self):
         """
-        Simple leadership takeover implementation.
+        Assume leadership after being elected.
         """
         logger.info(
             "LEADERSHIP TAKEOVER: Replica assuming leader role due to leader failure"
         )
 
-        # Stop heartbeat checking and update subscription
-        self.running = False
-
-        # Close existing channel to the failed leader
-        if self.channel:
-            self.channel.close()
+        # Shutdown replica operations
+        self._shutdown_replica_operations()
 
         # Import necessary modules for server functionality
         from concurrent import futures
@@ -272,15 +393,16 @@ class ReplicaManager:
             logger.info(f"Loaded model state from {server_central_path}")
 
         # Start the gRPC server
-        port = int(
-            self.leader_address.split(":")[-1]
-        )  # Use the same port as the leader
+        port = self.server_port
         grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
         model_update_pb2_grpc.add_FederatedLearningServiceServicer_to_server(
             servicer, grpc_server
         )
         grpc_server.add_insecure_port(f"[::]:{port}")
         grpc_server.start()
+
+        # Register as leader in ZooKeeper for other replicas to discover
+        self._register_as_leader()
 
         logger.info(
             f"LEADERSHIP TAKEOVER COMPLETE: Now serving as leader on port {port}"
@@ -306,6 +428,25 @@ class ReplicaManager:
             logger.info("Leader server shutting down...")
             grpc_server.stop(0)
 
+    def _shutdown_replica_operations(self):
+        """
+        Shut down replica-specific operations before becoming a leader.
+        """
+        logger.info("Shutting down replica operations before becoming leader")
+
+        # Mark as not running to stop threads
+        self.running = False
+
+        # Close connection to former leader
+        if self.channel:
+            self.channel.close()
+            self.channel = None
+
+        # Sleep briefly to allow threads to terminate
+        time.sleep(2)
+
+        logger.info("Replica operations shutdown complete")
+
     def start_heartbeat_monitoring(self) -> threading.Thread:
         """Start a thread to monitor leader heartbeats."""
 
@@ -327,8 +468,18 @@ class ReplicaManager:
         if not self.connect_to_leader():
             logger.error("Failed to connect to leader. Retrying in 10 seconds...")
             time.sleep(10)
-            self.start()
-            return
+
+            # Try to discover current leader in case the original one failed
+            if self._discover_leader():
+                logger.info(f"Found new leader at {self.leader_address}, connecting")
+                if not self.connect_to_leader():
+                    logger.error("Failed to connect to new leader. Retrying...")
+                    time.sleep(10)
+                    self.start()
+                    return
+            else:
+                self.start()
+                return
 
         # Subscribe to model updates
         update_thread = self.subscribe_to_updates()
@@ -344,6 +495,10 @@ class ReplicaManager:
             while self.running:
                 time.sleep(check_interval)
 
+                # Periodically check for leader changes
+                if consecutive_failures == 0:  # Only check when things seem normal
+                    self._discover_leader()
+
                 # Check if leader is down
                 if not self.leader_is_alive:
                     consecutive_failures += 1
@@ -351,20 +506,53 @@ class ReplicaManager:
                         f"Leader is down! ({consecutive_failures}/{max_consecutive_failures}) Waiting for recovery..."
                     )
 
-                    # Try reconnecting
+                    # Check for new leader first before trying to reconnect
+                    if self._discover_leader():
+                        logger.info(
+                            f"Discovered new leader at {self.leader_address}, attempting to connect"
+                        )
+                        if self.connect_to_leader():
+                            logger.info("Successfully connected to new leader")
+                            consecutive_failures = 0
+                            self.leader_is_alive = True
+                            continue
+
+                    # Try reconnecting to current leader
                     if self.connect_to_leader():
                         logger.info("Successfully reconnected to leader")
                         consecutive_failures = 0
                         self.leader_is_alive = True
                         continue
 
-                    # Check if we should take over leadership
+                    # Check if we should initiate election
                     if consecutive_failures >= max_consecutive_failures:
                         logger.warning(
-                            f"Leader failed to recover after {consecutive_failures} attempts. Taking over leadership."
+                            f"Leader failed to recover after {consecutive_failures} attempts. Initiating election."
                         )
-                        self._assume_leadership()
-                        return  # Exit this method as we've now become the leader
+
+                        # Simple deterministic election based on port number
+                        if self._elect_leader():
+                            logger.info(
+                                "This replica won the election and will become the new leader"
+                            )
+                            self._assume_leadership()
+                            return  # Exit this method as we've now become the leader
+                        else:
+                            logger.info(
+                                "Another replica was elected as leader, continuing as replica"
+                            )
+                            # Reset failure counter to give the new leader time to start
+                            consecutive_failures = 0
+                            # Wait a bit longer for the new leader to start up
+                            time.sleep(15)
+                            # Try to discover and connect to the new leader
+                            if self._discover_leader():
+                                logger.info(
+                                    f"Discovered new leader at {self.leader_address}, attempting to connect"
+                                )
+                                if self.connect_to_leader():
+                                    logger.info("Successfully connected to new leader")
+                                    self.leader_is_alive = True
                 else:
                     consecutive_failures = 0
 
