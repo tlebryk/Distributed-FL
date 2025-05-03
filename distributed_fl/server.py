@@ -1,4 +1,3 @@
-# server.py
 import csv
 import io
 import queue
@@ -6,6 +5,7 @@ import threading
 import os
 import tempfile
 import time
+import argparse
 from typing import NamedTuple, Dict, Any
 import zlib
 from concurrent import futures
@@ -25,6 +25,7 @@ import shutil
 
 from zk_manager import ZKManager
 from model_aggregator import ModelAggregator
+from replica_manager import ReplicaManager
 
 logger = get_logger(__name__)
 
@@ -43,12 +44,12 @@ class DecodedModelUpdate(NamedTuple):
 class FederatedLearningServiceServicer(
     model_update_pb2_grpc.FederatedLearningServiceServicer
 ):
-    def __init__(self, mode="test", zk_hosts="127.0.0.1:2181"):
+    def __init__(self, mode="leader", zk_hosts="127.0.0.1:2181"):
         # Store received adapter updates
         self.update_requests = []
-        # self.historic_updates = []
         self.global_adapter_state = None  # Aggregated adapter weights
         self.version = 0
+        self.mode = mode
 
         # New attributes for hybrid approach
         self.connected_clients = {}  # {client_id: {version, last_seen}}
@@ -354,15 +355,16 @@ def cleanup_disconnected_clients(servicer):
             logger.info(f"Removed inactive client: {client_id}")
 
 
-def serve():
-    servicer = FederatedLearningServiceServicer()
+def serve_as_leader(args):
+    """Start the server in leader mode"""
+    servicer = FederatedLearningServiceServicer(zk_hosts=args.zk_hosts)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     model_update_pb2_grpc.add_FederatedLearningServiceServicer_to_server(
         servicer, server
     )
-    server.add_insecure_port("[::]:50051")
+    server.add_insecure_port(f"[::]:{args.server_port}")
     server.start()
-    logger.info("Server started on port 50051.")
+    logger.info(f"Leader server started on port {args.server_port}.")
 
     # Start a background thread for periodic client cleanup
     def cleanup_thread():
@@ -371,7 +373,7 @@ def serve():
                 cleanup_disconnected_clients(servicer)
                 time.sleep(60)  # Run cleanup every minute
             except Exception as e:
-                logger.info(f"Error in cleanup thread: {e}")
+                logger.error(f"Error in cleanup thread: {e}")
 
     cleanup_task = threading.Thread(target=cleanup_thread, daemon=True)
     cleanup_task.start()
@@ -381,11 +383,73 @@ def serve():
         while True:
             time.sleep(86400)  # Sleep for a day
     except KeyboardInterrupt:
-        logger.info("Server shutting down...")
+        logger.info("Leader server shutting down...")
         server.stop(0)
-        if servicer.zk is not None:
-            servicer.zk.stop()
-            servicer.zk.close()
+        if servicer.zk_manager.zk is not None:
+            servicer.zk_manager.zk.stop()
+            servicer.zk_manager.zk.close()
+
+
+def serve_as_replica(args):
+    """Start the server in replica mode"""
+    logger.info(
+        f"Starting server in replica mode, connecting to leader at {args.leader_address}"
+    )
+
+    # Create unique replica ID based on hostname and port
+    import socket
+
+    hostname = socket.gethostname()
+    replica_id = f"{hostname}_{args.server_port}"
+
+    # Initialize the replica manager
+    replica_manager = ReplicaManager(
+        replica_id=replica_id,
+        leader_address=args.leader_address,
+        adapters_path=PATH_TO_ADAPTERS,
+    )
+
+    # Start the replica manager (which connects to the leader)
+    replica_manager.start()
+
+    # In the future, we would add leader election and takeover logic here
+    # For now, we just maintain a connection to the leader and sync models
+
+
+def serve():
+    """Parse arguments and start the server in the appropriate mode"""
+    parser = argparse.ArgumentParser(description="Federated Learning Server")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="leader",
+        choices=["leader", "replica"],
+        help="Server operation mode (leader or replica)",
+    )
+    parser.add_argument(
+        "--leader-address",
+        type=str,
+        default="localhost:50051",
+        help="Leader server address (for replica mode)",
+    )
+    parser.add_argument(
+        "--server-port",
+        type=int,
+        default=50051,
+        help="Port to listen on",
+    )
+    parser.add_argument(
+        "--zk-hosts",
+        type=str,
+        default="127.0.0.1:2181",
+        help="ZooKeeper connection string",
+    )
+    args = parser.parse_args()
+
+    if args.mode == "leader":
+        serve_as_leader(args)
+    else:
+        serve_as_replica(args)
 
 
 if __name__ == "__main__":

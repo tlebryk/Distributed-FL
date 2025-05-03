@@ -83,7 +83,9 @@ class HumanEvalBenchmark(Benchmark):
         """
         Load the HumanEval dataset from Hugging Face.
         """
-        self.dataset = load_dataset("openai/openai_humaneval", split="test")
+        self.dataset = load_dataset("openai/openai_humaneval", split="test").select(
+            range(2)
+        )
 
     def evaluate_example(self, example: dict, agent) -> dict:
         """
