@@ -106,7 +106,7 @@ class ReplicaManager:
 
         # Make sure directories exist
         self.replica_model_path = os.path.join(
-            self.path_to_adapters, "replica", "models"
+            self.path_to_adapters, "server", "central"
         )
         os.makedirs(self.replica_model_path, exist_ok=True)
 
