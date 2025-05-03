@@ -35,6 +35,11 @@ class FederatedLearningServiceStub(object):
                 request_serializer=model__update__pb2.ClientRequest.SerializeToString,
                 response_deserializer=model__update__pb2.UpdateNotification.FromString,
                 )
+        self.SendHeartbeat = channel.unary_unary(
+                '/federated.FederatedLearningService/SendHeartbeat',
+                request_serializer=model__update__pb2.HeartbeatRequest.SerializeToString,
+                response_deserializer=model__update__pb2.HeartbeatResponse.FromString,
+                )
 
 
 class FederatedLearningServiceServicer(object):
@@ -55,7 +60,7 @@ class FederatedLearningServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def ConnectClient(self, request, context):
-        """New RPCs for hybrid approach
+        """Hybrid approach RPCs
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -63,6 +68,13 @@ class FederatedLearningServiceServicer(object):
 
     def SubscribeToUpdates(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SendHeartbeat(self, request, context):
+        """New heartbeat RPC
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -89,6 +101,11 @@ def add_FederatedLearningServiceServicer_to_server(servicer, server):
                     servicer.SubscribeToUpdates,
                     request_deserializer=model__update__pb2.ClientRequest.FromString,
                     response_serializer=model__update__pb2.UpdateNotification.SerializeToString,
+            ),
+            'SendHeartbeat': grpc.unary_unary_rpc_method_handler(
+                    servicer.SendHeartbeat,
+                    request_deserializer=model__update__pb2.HeartbeatRequest.FromString,
+                    response_serializer=model__update__pb2.HeartbeatResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -166,5 +183,22 @@ class FederatedLearningService(object):
         return grpc.experimental.unary_stream(request, target, '/federated.FederatedLearningService/SubscribeToUpdates',
             model__update__pb2.ClientRequest.SerializeToString,
             model__update__pb2.UpdateNotification.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def SendHeartbeat(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/federated.FederatedLearningService/SendHeartbeat',
+            model__update__pb2.HeartbeatRequest.SerializeToString,
+            model__update__pb2.HeartbeatResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

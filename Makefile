@@ -26,7 +26,6 @@ run_client_b:
 client_entrypoint: 
 	docker run --rm -it -p 50052:50052 client bash
 
-
 server_entrypoint: 
 	docker run --rm -it -p 50051:50051 \
 	-v ./distributed_fl:/app/distributed_fl \

@@ -8,7 +8,7 @@ message ModelUpdate {
   bytes update = 2;         // Serialized (and optionally compressed) model update payload
   int32 version = 3;        // For version tracking
   int64 timestamp = 4;      // For ordering and verification
-  float pylint_score = 5;        // Weight of this update
+  float pylint_score = 5;   // Weight of this update
 }
 
 // Message sent by the server containing aggregated model
@@ -29,7 +29,6 @@ message ClientRequest {
   int32 current_version = 2;
 }
 
-
 // New message types for hybrid approach
 message ClientConnection {
   string client_id = 1;
@@ -48,13 +47,36 @@ message UpdateNotification {
   string update_type = 2;       // "FULL" or "INCREMENTAL"
 }
 
+// Simple heartbeat messages
+message HeartbeatRequest {
+  string sender_id = 1;
+  int64 timestamp = 2;
+}
+
+message HeartbeatResponse {
+  bool alive = 1;
+  int32 current_version = 2;
+  string status = 3;
+}
+
+// Response for graceful redirection to new leader
+message RedirectResponse {
+  string new_leader_address = 1;
+  int32 current_version = 2;
+  string message = 3;
+}
+
 // Extended service definition
 service FederatedLearningService {
   // Existing RPCs
   rpc SubmitUpdate(ModelUpdate) returns (Acknowledgement);
   rpc GetAggregatedModel(ClientRequest) returns (AggregatedModel);
   
-  // New RPCs for hybrid approach
+  // Hybrid approach RPCs
   rpc ConnectClient(ClientConnection) returns (ModelVersionInfo);
   rpc SubscribeToUpdates(ClientRequest) returns (stream UpdateNotification);
+  
+  // Heartbeat and leader status RPCs
+  rpc SendHeartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc CheckLeaderStatus(ClientRequest) returns (RedirectResponse);
 }
