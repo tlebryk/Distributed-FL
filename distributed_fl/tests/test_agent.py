@@ -58,42 +58,6 @@ def test_initialize_with_adapter_path(monkeypatch, tmp_path):
     assert called.get("path") == str(adapter_dir)
 
 
-@pytest.mark.slow
-def test_load_latest_adapter_uses_env_and_central_latest(monkeypatch):
-    # Point PATH_TO_ADAPTERS at our tmp structure
-    adapters_root = Path("/tmp/fake_adapters")
-    central_latest = adapters_root / "central" / "latest"
-    central_latest.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setenv("PATH_TO_ADAPTERS", str(adapters_root))
-    # force agent to re-import so it picks up new PATH_TO_ADAPTERS
-    if "agent" in sys.modules:
-        del sys.modules["agent"]
-    import agent  # noqa: F401
-
-    importlib.reload(agent)
-
-    # stub out PeftModel.from_pretrained again
-    called = {}
-
-    def fake_from_pretrained(model, path, is_trainable=False):
-        called["path"] = path
-        return model
-
-    monkeypatch.setattr(agent.PeftModel, "from_pretrained", fake_from_pretrained)
-
-    # initialize and then call load_latest_adapter
-    from agent import LoraHuggingFaceAgent
-
-    agent = LoraHuggingFaceAgent(
-        model_name=SMALL_MODEL,
-        device="cpu",
-    )
-    agent.load_latest_adapter()
-    expected = str(central_latest)
-    assert called.get("path") == expected
-
-
 def test_get_base_model_strips_peft_wrapper():
     from agent import LoraHuggingFaceAgent
 

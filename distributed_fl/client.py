@@ -11,19 +11,19 @@ import threading
 import time
 import traceback
 import zlib
+from statistics import mean
 
 import grpc
 import model_update_pb2
 import model_update_pb2_grpc
 import torch
+from agent import LoraHuggingFaceAgent
 from logger import get_logger
 from peft import PeftModel
 from python_extractor import create_huggingface_dataset
-from training import train_model, ModelArguments
-from agent import LoraHuggingFaceAgent
-from utils import load_safetensors_from_bytes, find_latest_adapter_version
 from safetensors.torch import save_file
-from statistics import mean
+from training import ModelArguments, train_model
+from utils import find_latest_adapter_version, load_safetensors_from_bytes
 
 logger = get_logger(__name__)
 

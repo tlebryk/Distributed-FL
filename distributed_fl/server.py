@@ -1,3 +1,4 @@
+# server.py
 import csv
 import io
 import queue
@@ -177,7 +178,7 @@ class FederatedLearningServiceServicer(
             import traceback
 
             traceback.print_exc()
-            logger.info("Error in SubmitUpdate:", e)
+            logger.info(f"Error in SubmitUpdate: {e}")
             return model_update_pb2.Acknowledgement(success=False, message=str(e))
 
     def _perform_aggregation_and_evaluation(self):

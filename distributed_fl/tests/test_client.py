@@ -1,134 +1,367 @@
-# test_client.py
 import io
-import time
-import zlib
+import os
+import shutil
+import tempfile
+
 import pytest
-import grpc
-from unittest import mock
 import torch
-from transformers import AutoModelForCausalLM
-from client import FederatedClient, get_adapter_update
-import model_update_pb2 as model_update_pb2
-import model_update_pb2_grpc as model_update_pb2_grpc
+
+import client
+from client import FederatedClient, serialize_state_dict
 
 
-@pytest.fixture
-def mock_stub():
-    """Fixture to mock the FederatedLearningServiceStub."""
-    stub = mock.Mock(spec=model_update_pb2_grpc.FederatedLearningServiceStub)
-    return stub
+def test_serialize_state_dict_roundtrip():
+    # Create a dummy state dict
+    orig = {"a": torch.tensor([1, 2, 3]), "b": torch.tensor(5)}
+    data = serialize_state_dict(orig)
+    # Load it back
+    buffer = io.BytesIO(data)
+    loaded = torch.load(buffer)
+    # Tensors equal
+    assert set(loaded.keys()) == set(orig.keys())
+    for k in orig:
+        assert torch.equal(loaded[k], orig[k])
 
 
-@pytest.fixture
-def mock_channel():
-    """Fixture to mock the gRPC channel."""
-    channel = mock.Mock(spec=grpc.Channel)
-    return channel
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        ("/no/versions/here", 0),
+        ("v1", 1),
+        ("/foo/v2/bar", 2),
+        ("foo/v10/v3", 3),  # last wins
+        ("foo/v42_extra", 0),  # fullmatch only
+        ("foo/v007", 7),
+    ],
+)
+def test_get_version(path, expected):
+    assert FederatedClient.get_version(path) == expected
 
 
-@pytest.fixture
-def client(mock_stub, mock_channel):
-    """Fixture to create a FederatedClient with mocked stub and channel."""
-    with mock.patch("grpc.insecure_channel", return_value=mock_channel):
-        with mock.patch(
-            "distributed_fl.model_update_pb2_grpc.FederatedLearningServiceStub",
-            return_value=mock_stub,
-        ):
-            client = FederatedClient(client_id="client_1")
-            client.channel = mock_channel
-            client.stub = mock_stub
-            client.initialize_model()
-            return client
-
-
-def test_initialize_model(client):
-    """Test that the model is initialized correctly."""
-    assert client.model is not None
-    assert isinstance(client.model, AutoModelForCausalLM)
-
-
-def test_connect_to_server_success(client, mock_stub):
-    """Test successful connection to the server without updates."""
-    response = model_update_pb2.ConnectResponse(
-        latest_version=1, update_available=False, model_state=b""
+def test__get_latest_version_empty(tmp_path):
+    # no directory: returns 0
+    assert (
+        FederatedClient("id")._get_latest_version(str(tmp_path / "does_not_exist")) == 0
     )
-    mock_stub.ConnectClient.return_value = response
+    # empty dir
+    d = tmp_path / "empty"
+    d.mkdir()
+    assert FederatedClient("id")._get_latest_version(str(d)) == 0
 
-    success = client.connect_to_server()
-    assert success
-    assert client.current_version == 1
+
+def test__get_latest_version_with_versions(tmp_path):
+    d = tmp_path / "versions"
+    d.mkdir()
+    # create some entries
+    for name in ["v1", "v2", "v10", "notav", "v3_extra"]:
+        (d / name).mkdir(exist_ok=True)
+    # only full vN directories count
+    assert FederatedClient("id")._get_latest_version(str(d)) == 10
 
 
-def test_connect_to_server_with_update(client, mock_stub):
-    """Test connection to the server with a model update."""
-    # Create a dummy adapter state
-    adapter_state = {"key": torch.tensor([1, 2, 3])}
-    buffer = io.BytesIO()
-    torch.save(adapter_state, buffer)
-    compressed_state = zlib.compress(buffer.getvalue())
+@pytest.mark.parametrize(
+    "dirname, expected_round",
+    [
+        ("adapter_foo_r42", 42),
+        ("adapter_bar_r7", 7),
+        ("adapter__r100", 100),
+        ("notadapter_foo_r5", 0),
+        ("adapter_foo_no_r", 0),
+        ("something_else", 0),
+    ],
+)
+def test__get_round_from_path(dirname, expected_round):
+    client = FederatedClient("id")
+    # monkey‐patch out gRPC init to avoid side effects
+    client.initialize_connection = lambda: None
+    assert client._get_round_from_path(dirname) == expected_round
 
-    response = model_update_pb2.ConnectResponse(
-        latest_version=2, update_available=True, model_state=compressed_state
+
+def test_update_server_address(monkeypatch):
+    # stub out initialize_connection so no real gRPC
+    monkeypatch.setattr(
+        FederatedClient,
+        "initialize_connection",
+        lambda self: setattr(self, "_init_called", True),
     )
-    mock_stub.ConnectClient.return_value = response
+    c = FederatedClient(client_id="id", server_address="host:1", fallback_addresses=[])
+    # initial init called
+    assert hasattr(c, "_init_called")
+    delattr(c, "_init_called")
 
-    with mock.patch.object(client.model, "load_state_dict") as mock_load_state_dict:
-        success = client.connect_to_server()
-        assert success
-        assert client.current_version == 2
-        mock_load_state_dict.assert_called_with(adapter_state, strict=False)
+    # updating to a new address
+    result = c.update_server_address("host:2")
+    assert result is True
+    assert c.server_address == "host:2"
+    assert getattr(c, "_init_called", False)
 
+    # updating to same address -> no change
+    delattr(c, "_init_called")
+    result_same = c.update_server_address("host:2")
+    assert result_same is False
+    assert not hasattr(c, "_init_called")
 
-def test_get_latest_model(client, mock_stub):
-    """Test fetching the latest model from the server."""
-    adapter_state = {"key": torch.tensor([4, 5, 6])}
-    buffer = io.BytesIO()
-    torch.save(adapter_state, buffer)
-    compressed_state = zlib.compress(buffer.getvalue())
-
-    response = model_update_pb2.AggregatedModel(version=3, model_state=compressed_state)
-    mock_stub.GetAggregatedModel.return_value = response
-
-    with mock.patch.object(client.model, "load_state_dict") as mock_load_state_dict:
-        success = client.get_latest_model()
-        assert success
-        assert client.current_version == 3
-        mock_load_state_dict.assert_called_with(adapter_state, strict=False)
+    # empty or None
+    assert c.update_server_address("") is False
+    assert c.update_server_address(None) is False
 
 
-def test_train_and_submit_success(client, mock_stub):
-    """Test successful training and submission of an update."""
-    ack = model_update_pb2.SubmitAck(success=True, message="Update received")
-    mock_stub.SubmitUpdate.return_value = ack
+import sys
+import time
+import os
+import shutil
+from types import SimpleNamespace
 
-    with mock.patch("time.sleep", return_value=None):
-        success = client.train_and_submit()
-        assert success
+import pytest
+import torch
+
+import client
+from client import FederatedClient, parse_args, serialize_state_dict
+import model_update_pb2
 
 
-def test_train_and_submit_version_mismatch(client, mock_stub):
-    """Test handling of version mismatch during submission."""
-    ack = model_update_pb2.SubmitAck(
-        success=False, message="Update rejected due to outdated model"
+class FakeHeartbeatResponse:
+    def __init__(self, alive):
+        self.alive = alive
+
+
+class FakeStub:
+    def __init__(
+        self,
+        hb_responses=None,
+        connect_response=None,
+        agg_response=None,
+        submit_response=None,
+    ):
+        # lists or single objects
+        self._hbs = hb_responses or []
+        self._connect = connect_response
+        self._agg = agg_response
+        self._submit = submit_response
+        self._hb_calls = 0
+
+    def SendHeartbeat(self, *args, **kwargs):
+        if self._hb_calls >= len(self._hbs):
+            raise RuntimeError("No more fake heartbeats")
+        resp = self._hbs[self._hb_calls]
+        self._hb_calls += 1
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
+
+    def ConnectClient(self, *args, **kwargs):
+        return self._connect
+
+    def GetAggregatedModel(self, *args, **kwargs):
+        return self._agg
+
+    def SubmitUpdate(self, *args, **kwargs):
+        return self._submit
+
+
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch):
+    # speed up retries
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+
+def make_client(monkeypatch):
+    # prevent real gRPC and agent init
+    monkeypatch.setattr(FederatedClient, "initialize_connection", lambda self: None)
+    fake_agent = SimpleNamespace(
+        model=SimpleNamespace(load_state_dict=lambda *a, **k: None), tokenizer=None
     )
-    mock_stub.SubmitUpdate.return_value = ack
-
-    with mock.patch.object(client, "get_latest_model") as mock_get_latest_model:
-        with mock.patch("time.sleep", return_value=None):
-            success = client.train_and_submit()
-            assert not success
-            mock_get_latest_model.assert_called()
-
-
-def test_run_training_loop_interrupt(client):
-    """Test graceful shutdown of the training loop."""
-    with mock.patch.object(client, "train_and_submit", side_effect=KeyboardInterrupt):
-        with pytest.raises(SystemExit):
-            client.run_training_loop()
+    monkeypatch.setattr(
+        FederatedClient,
+        "initialize_agent",
+        lambda self: setattr(self, "agent", fake_agent),
+    )
+    return FederatedClient("test_id")
 
 
-def test_shutdown(client):
-    """Test client shutdown procedure."""
-    client.shutdown()
-    assert not client.running
-    client.channel.close.assert_called_once()
+def test_try_fallback_servers_no_fallback(monkeypatch):
+    c = make_client(monkeypatch)
+    c.fallback_addresses = []
+    assert not c.try_fallback_servers()
+
+
+def test_try_fallback_servers_success(monkeypatch):
+    c = make_client(monkeypatch)
+    # two fallbacks, first same as original is skipped
+    c.server_address = "A"
+    c.fallback_addresses = ["A", "B", "C"]
+    # fake stub returns alive on first try
+    c.stub = FakeStub(hb_responses=[FakeHeartbeatResponse(True)])
+    # record updates
+    updated = []
+
+    def fake_update(addr):
+        updated.append(addr)
+        c.server_address = addr
+        return True
+
+    c.update_server_address = fake_update
+    assert c.try_fallback_servers() is True
+    assert updated == ["B"]
+    assert c.server_address == "B"
+
+
+def test_try_fallback_servers_all_fail(monkeypatch):
+    c = make_client(monkeypatch)
+    c.server_address = "X"
+    c.fallback_addresses = ["X", "Y"]
+    # both fallback heartbeats raise
+    c.stub = FakeStub(hb_responses=[RuntimeError(), RuntimeError()])
+    # track restore
+    calls = []
+
+    def fake_update(addr):
+        calls.append(addr)
+        c.server_address = addr
+        return True
+
+    c.update_server_address = fake_update
+    res = c.try_fallback_servers()
+    assert not res
+    # first update to Y, then restore to original X
+    assert calls == ["Y", "X"]
+    assert c.server_address == "X"
+
+
+def test_check_connection_success(monkeypatch):
+    c = make_client(monkeypatch)
+    c.stub = FakeStub(hb_responses=[FakeHeartbeatResponse(True)])
+    assert c.check_connection() is True
+
+
+def test_check_connection_fallback(monkeypatch):
+    c = make_client(monkeypatch)
+    # heartbeat raises, but fallback returns True immediately
+    c.stub = FakeStub(hb_responses=[RuntimeError()])
+    monkeypatch.setattr(c, "try_fallback_servers", lambda: True)
+    assert c.check_connection() is True
+
+
+def test_check_connection_failure(monkeypatch):
+    c = make_client(monkeypatch)
+    c.stub = FakeStub(hb_responses=[RuntimeError(), RuntimeError(), RuntimeError()])
+    monkeypatch.setattr(c, "try_fallback_servers", lambda: False)
+    assert c.check_connection(max_retries=2) is False
+
+
+def test_connect_to_server_no_update(monkeypatch):
+    c = make_client(monkeypatch)
+    # stub ConnectClient returns no update
+    fake_version = SimpleNamespace(
+        update_available=False, latest_version=9, model_state=b""
+    )
+    c.stub = FakeStub(connect_response=fake_version)
+    # pretend connection always OK
+    monkeypatch.setattr(c, "check_connection", lambda *a, **k: True)
+    assert c.connect_to_server() is True
+    assert c.current_version == 0  # unchanged
+
+
+def test_get_latest_model_no_state(monkeypatch):
+    c = make_client(monkeypatch)
+    # stub GetAggregatedModel returns no state
+    fake_agg = SimpleNamespace(model_state=b"", version=2)
+    c.stub = FakeStub(agg_response=fake_agg)
+    assert c.get_latest_model() is False
+
+
+def test_get_latest_model_with_state(monkeypatch, tmp_path):
+    c = make_client(monkeypatch)
+    fake_bytes = b"abc"
+    fake_agg = SimpleNamespace(model_state=fake_bytes, version=7)
+    c.stub = FakeStub(agg_response=fake_agg)
+    # stub loads and saves
+    monkeypatch.setattr(
+        client, "load_safetensors_from_bytes", lambda b: {"x": torch.tensor([1])}
+    )
+    c.agent.model.load_state_dict = lambda st, strict: None
+    # intercept save_adapter_to_disk
+    monkeypatch.setattr(c, "save_adapter_to_disk", lambda d, v: d)
+    monkeypatch.setattr(shutil, "copy2", lambda *a, **k: None)
+    assert c.get_latest_model() is True
+    assert c.current_version == 7
+
+
+def test_train_and_submit_success(monkeypatch):
+    c = make_client(monkeypatch)
+    # stub SubmitUpdate success
+    fake_ack = SimpleNamespace(success=True, message="ok")
+    c.stub = FakeStub(submit_response=fake_ack)
+    # stub internals
+    monkeypatch.setattr(c, "check_connection", lambda: True)
+    monkeypatch.setattr(c, "connect_to_server", lambda *a, **k: True)
+    monkeypatch.setattr(
+        c, "get_adapter_update", lambda agent, code_path: (b"upd", 4.56)
+    )
+    assert c.train_and_submit() is True
+
+
+def test_train_and_submit_outdated(monkeypatch):
+    c = make_client(monkeypatch)
+    # stub SubmitUpdate failure due to outdated
+    fake_ack = SimpleNamespace(success=False, message="outdated model, please refresh")
+    c.stub = FakeStub(submit_response=fake_ack)
+    monkeypatch.setattr(c, "check_connection", lambda: True)
+    monkeypatch.setattr(c, "connect_to_server", lambda *a, **k: True)
+    monkeypatch.setattr(c, "get_adapter_update", lambda agent, code_path: (b"", 0.0))
+    called = {"got": False}
+    monkeypatch.setattr(
+        c, "get_latest_model", lambda *a, **k: called.__setitem__("got", True)
+    )
+    res = c.train_and_submit()
+    assert res is False
+    assert called["got"]
+
+
+def test_shutdown_closes_channel(monkeypatch):
+    c = make_client(monkeypatch)
+    closed = {"flag": False}
+    c.channel = SimpleNamespace(close=lambda: closed.__setitem__("flag", True))
+    c.running = True
+    c.shutdown()
+    assert not c.running
+    assert closed["flag"]
+
+
+def test_parse_args_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH_TO_ADAPTERS", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["prog"])
+    args = parse_args()
+    assert args.client_id == "client_1"
+    assert args.server_address == "localhost:50051"
+    assert args.fallback_addresses is None
+    assert args.interval == 15
+    assert args.code_path == "./data"
+
+
+def test_parse_args_custom(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH_TO_ADAPTERS", str(tmp_path))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--client_id",
+            "foo",
+            "--server_address",
+            "host:1234",
+            "--fallback_addresses",
+            "a:1",
+            "b:2",
+            "--interval",
+            "42",
+            "--code_path",
+            "/tmp/code",
+        ],
+    )
+    args = parse_args()
+    assert args.client_id == "foo"
+    assert args.server_address == "host:1234"
+    assert args.fallback_addresses == ["a:1", "b:2"]
+    assert args.interval == 42
+    assert args.code_path == "/tmp/code"

@@ -1,6 +1,4 @@
 from kazoo.client import KazooClient, KazooState
-from kazoo.exceptions import NodeExistsError, NoNodeError
-import time
 import logging
 import threading
 import uuid

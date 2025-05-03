@@ -106,6 +106,7 @@ def test_create_huggingface_dataset_basic(tmp_path, capsys):
         "output",
         "function_name",
         "file_path",
+        "pylint_score",
     }
 
     # Check contents
