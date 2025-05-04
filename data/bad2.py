@@ -9,4 +9,8 @@ def separate_paren_groups(paren_string: str) -> List[str]:
     >>> separate_paren_groups('( ) (( )) (( )( ))')
     ['()', '(())', '(()())']
     """
+    result = []
+    for token in paren_string.split():
+        if token:
+            result.append(token.replace(" ", ""))
     return [token.replace(" ", "") for token in paren_string.split() if token]

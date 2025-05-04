@@ -1,28 +1,19 @@
 # server.py
-import csv
-import io
+
 import queue
 import threading
 import os
-import tempfile
 import time
 import argparse
 from typing import NamedTuple, Dict, Any
-import zlib
 from concurrent import futures
 
 import grpc
 import model_update_pb2
 import model_update_pb2_grpc
-import torch
-from eval_script import evaluate
 from benchmark import HumanEvalBenchmark
-from agent import LoraHuggingFaceAgent
-from safetensors.torch import load_file
 from logger import get_logger
-from utils import find_latest_adapter_version, load_safetensors_from_bytes
-from safetensors.torch import save_file
-import shutil
+from utils import load_safetensors_from_bytes
 import socket
 
 from zk_manager import ZKManager

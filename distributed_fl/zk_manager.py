@@ -1,7 +1,9 @@
 from kazoo.client import KazooClient, KazooState
-import logging
 import threading
 import uuid
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class ZKManager:
@@ -23,7 +25,7 @@ class ZKManager:
     def _initialize_connection(self):
         """Initialize the ZooKeeper connection."""
         try:
-            logging.info(f"Connecting to ZooKeeper at {self.hosts}")
+            logger.info(f"Connecting to ZooKeeper at {self.hosts}")
             self.zk = KazooClient(hosts=self.hosts)
             self.zk.start()
 
@@ -33,23 +35,23 @@ class ZKManager:
             # Ensure election path exists
             self.zk.ensure_path(self.election_path)
 
-            logging.info("Connected to ZooKeeper successfully")
+            logger.info("Connected to ZooKeeper successfully")
         except Exception as e:
-            logging.error(f"ZooKeeper connection error: {e}")
+            logger.error(f"ZooKeeper connection error: {e}")
             self.zk = None
 
     def _connection_listener(self, state):
         """Handle ZooKeeper connection state changes."""
         if state == KazooState.LOST:
             # Connection is lost
-            logging.warning("ZooKeeper connection lost")
+            logger.warning("ZooKeeper connection lost")
             self.is_leader = False
         elif state == KazooState.SUSPENDED:
             # Connection is suspended
-            logging.warning("ZooKeeper connection suspended")
+            logger.warning("ZooKeeper connection suspended")
         elif state == KazooState.CONNECTED:
             # Connection (re)established
-            logging.info("ZooKeeper connection (re)established")
+            logger.info("ZooKeeper connection (re)established")
             # Re-register in the election if previously registered
             if self.node_id:
                 self._rejoin_election()
@@ -59,22 +61,22 @@ class ZKManager:
         try:
             if self.election_path_full and self.zk.exists(self.election_path_full):
                 # Our node still exists, we're still in the election
-                logging.info(f"Election node {self.election_path_full} still exists")
+                logger.info(f"Election node {self.election_path_full} still exists")
                 # Check if we are now the leader
                 self._check_leadership()
             else:
                 # Our node disappeared, need to rejoin election
-                logging.info("Rejoining leader election")
+                logger.info("Rejoining leader election")
                 self.node_id = None
                 self.election_path_full = None
                 self.participate_election()
         except Exception as e:
-            logging.error(f"Error rejoining election: {e}")
+            logger.error(f"Error rejoining election: {e}")
 
     def update_client_weight(self, client_id, weight):
         """Update a client's weight in ZooKeeper."""
         if not self.zk:
-            logging.error("ZooKeeper not connected")
+            logger.error("ZooKeeper not connected")
             return False
 
         # Ensure the parent path exists
@@ -88,13 +90,13 @@ class ZKManager:
         else:
             self.zk.create(path, data, makepath=True)
 
-        logging.info(f"Set {path} = {weight}")
+        logger.info(f"Set {path} = {weight}")
         return True
 
     def get_client_weight(self, client_id):
         """Get a client's weight from ZooKeeper."""
         if not self.zk:
-            logging.error("ZooKeeper not connected")
+            logger.error("ZooKeeper not connected")
             return 0.5
 
         path = f"/myapp/clients/{client_id}"
@@ -102,9 +104,9 @@ class ZKManager:
         if self.zk.exists(path):
             raw, stat = self.zk.get(path)
             weight = float(raw.decode("utf-8"))
-            logging.info(f"Weight for {client_id}: {weight}")
+            logger.info(f"Weight for {client_id}: {weight}")
         else:
-            logging.info(f"No entry for {client_id}")
+            logger.info(f"No entry for {client_id}")
             self.update_client_weight(client_id, weight)
 
         return weight
@@ -112,7 +114,7 @@ class ZKManager:
     def update_past_accuracy(self, accuracy):
         """Update the past accuracy value in ZooKeeper."""
         if not self.zk:
-            logging.error("ZooKeeper not connected")
+            logger.error("ZooKeeper not connected")
             return False
 
         path = f"/myapp/human_eval/accuracy"
@@ -122,13 +124,13 @@ class ZKManager:
             self.zk.set(path, data)
         else:
             self.zk.create(path, data, makepath=True)
-        logging.info(f"Set {path} = {accuracy}")
+        logger.info(f"Set {path} = {accuracy}")
         return True
 
     def get_past_accuracy(self):
         """Get the past accuracy value from ZooKeeper."""
         if not self.zk:
-            logging.error("ZooKeeper not connected")
+            logger.error("ZooKeeper not connected")
             return 0
 
         path = f"/myapp/human_eval/accuracy"
@@ -136,9 +138,9 @@ class ZKManager:
         if self.zk.exists(path):
             raw, stat = self.zk.get(path)
             accuracy = float(raw.decode("utf-8"))
-            logging.info(f"accuracy for: {accuracy}")
+            logger.info(f"accuracy for: {accuracy}")
         else:
-            logging.info(f"No entry for human eval accuracy")
+            logger.info(f"No entry for human eval accuracy")
             self.update_past_accuracy(accuracy)
         return accuracy
 
@@ -155,7 +157,7 @@ class ZKManager:
             bool: True if successfully joined election, False otherwise
         """
         if not self.zk:
-            logging.error("Cannot participate in election: ZooKeeper not connected")
+            logger.error("Cannot participate in election: ZooKeeper not connected")
             return False
 
         try:
@@ -173,7 +175,7 @@ class ZKManager:
                 sequence=True,
             )
 
-            logging.info(f"Created election node: {self.election_path_full}")
+            logger.info(f"Created election node: {self.election_path_full}")
 
             # Check if we are the leader
             self._check_leadership()
@@ -184,7 +186,7 @@ class ZKManager:
             return True
 
         except Exception as e:
-            logging.error(f"Error participating in election: {e}")
+            logger.error(f"Error participating in election: {e}")
             return False
 
     def _get_sorted_candidates(self):
@@ -205,7 +207,7 @@ class ZKManager:
             candidates.sort()
             return candidates
         except Exception as e:
-            logging.error(f"Error getting candidates: {e}")
+            logger.error(f"Error getting candidates: {e}")
             return []
 
     def _check_leadership(self):
@@ -217,7 +219,7 @@ class ZKManager:
             # Get sorted candidates
             candidates = self._get_sorted_candidates()
             if not candidates:
-                logging.warning("No candidates found in election")
+                logger.warning("No candidates found in election")
                 return False
 
             # Get our sequence number
@@ -236,7 +238,7 @@ class ZKManager:
                 self.leader_id = leader_data.decode("utf-8")
 
                 if not was_leader:
-                    logging.info(f"This node is now the leader: {self.leader_id}")
+                    logger.info(f"This node is now the leader: {self.leader_id}")
                     # Trigger leadership callbacks
                     self._trigger_leadership_callbacks(True)
             else:
@@ -246,18 +248,18 @@ class ZKManager:
                 self.leader_id = leader_data.decode("utf-8")
 
                 if was_leader:
-                    logging.info(
+                    logger.info(
                         f"This node is no longer the leader. New leader: {self.leader_id}"
                     )
                     # Trigger leadership callbacks
                     self._trigger_leadership_callbacks(False)
                 else:
-                    logging.info(f"Current leader is: {self.leader_id}")
+                    logger.info(f"Current leader is: {self.leader_id}")
 
             return self.is_leader
 
         except Exception as e:
-            logging.error(f"Error checking leadership: {e}")
+            logger.error(f"Error checking leadership: {e}")
             return False
 
     def _watch_predecessor(self):
@@ -285,13 +287,13 @@ class ZKManager:
             predecessor = candidates[my_index - 1]
             predecessor_path = f"{self.election_path}/{predecessor}"
 
-            logging.info(f"Watching predecessor: {predecessor_path}")
+            logger.info(f"Watching predecessor: {predecessor_path}")
 
             # Set up a watch on the predecessor
             @self.zk.DataWatch(predecessor_path)
             def watch_predecessor(data, stat, event):
                 if event and event.type == "DELETED":
-                    logging.info(f"Predecessor node {predecessor_path} deleted")
+                    logger.info(f"Predecessor node {predecessor_path} deleted")
                     # Check if we are now the leader
                     self._check_leadership()
                     # Set up watch on new predecessor
@@ -303,7 +305,7 @@ class ZKManager:
                 return True
 
         except Exception as e:
-            logging.error(f"Error setting up predecessor watch: {e}")
+            logger.error(f"Error setting up predecessor watch: {e}")
 
     def get_current_leader(self):
         """
@@ -330,7 +332,7 @@ class ZKManager:
             return leader_data.decode("utf-8")
 
         except Exception as e:
-            logging.error(f"Error getting current leader: {e}")
+            logger.error(f"Error getting current leader: {e}")
             return None
 
     def add_leadership_callback(self, callback):
@@ -354,7 +356,7 @@ class ZKManager:
             try:
                 callback(is_leader)
             except Exception as e:
-                logging.error(f"Error in leadership callback: {e}")
+                logger.error(f"Error in leadership callback: {e}")
 
     def wait_for_leadership_change(self, timeout=None):
         """
@@ -386,7 +388,7 @@ class ZKManager:
             return False
 
         if not self.is_leader:
-            logging.warning("Cannot create leader data: not the leader")
+            logger.warning("Cannot create leader data: not the leader")
             return False
 
         try:
@@ -406,7 +408,7 @@ class ZKManager:
             return True
 
         except Exception as e:
-            logging.error(f"Error creating leader data: {e}")
+            logger.error(f"Error creating leader data: {e}")
             return False
 
     def get_leader_data(self):
@@ -433,7 +435,7 @@ class ZKManager:
             return json.loads(data.decode("utf-8"))
 
         except Exception as e:
-            logging.error(f"Error getting leader data: {e}")
+            logger.error(f"Error getting leader data: {e}")
             return None
 
     def stop(self, timeout=5):
@@ -444,11 +446,11 @@ class ZKManager:
             timeout: Maximum time in seconds to wait for ZK to disconnect
         """
         if self.zk is None:
-            logging.debug("ZooKeeper already stopped or not started")
+            logger.debug("ZooKeeper already stopped or not started")
             return
 
         try:
-            logging.info("Stopping ZooKeeper client...")
+            logger.info("Stopping ZooKeeper client...")
 
             # Start a background thread to stop ZK with a timeout
             # This prevents hanging if ZK stop() blocks
@@ -456,9 +458,9 @@ class ZKManager:
                 try:
                     self.zk.stop()
                     self.zk.close()
-                    logging.info("ZooKeeper client stopped successfully")
+                    logger.info("ZooKeeper client stopped successfully")
                 except Exception as e:
-                    logging.error(f"Error stopping ZooKeeper client: {e}")
+                    logger.error(f"Error stopping ZooKeeper client: {e}")
 
             stop_thread = threading.Thread(target=stop_zk_with_timeout)
             stop_thread.daemon = (
@@ -470,13 +472,13 @@ class ZKManager:
             stop_thread.join(timeout)
 
             if stop_thread.is_alive():
-                logging.warning(
+                logger.warning(
                     f"ZooKeeper client did not stop within {timeout} seconds, continuing shutdown"
                 )
                 # Let the daemon thread continue in the background
                 # System exit will force it to terminate
         except Exception as e:
-            logging.error(f"Error during ZooKeeper shutdown: {e}")
+            logger.error(f"Error during ZooKeeper shutdown: {e}")
         finally:
             # Clear references to allow garbage collection
             self.zk = None

@@ -9,8 +9,6 @@ import re
 import shutil
 import threading
 import time
-import traceback
-import zlib
 from statistics import mean
 
 import grpc
@@ -19,7 +17,6 @@ import model_update_pb2_grpc
 import torch
 from agent import LoraHuggingFaceAgent
 from logger import get_logger
-from peft import PeftModel
 from python_extractor import create_huggingface_dataset
 from safetensors.torch import save_file
 from training import ModelArguments, train_model

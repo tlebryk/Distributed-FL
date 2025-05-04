@@ -33,7 +33,7 @@ server_entrypoint:
 	server bash 
 
 local_test:
-	cd distributed_fl && uv run python -m pytest
+	cd distributed_fl && uv run python -m pytest --cov=./
 
 local_server:
 	uv run python distributed_fl/server.py
@@ -41,8 +41,14 @@ local_server:
 local_client:
 	uv run python distributed_fl/client.py
 
+local_inference:
+	uv run python distributed_fl/inference_server.py
+
 zookeeper_build:
 	docker build -t my-zk:latest -f distributed_fl/Dockerfile.zookeeper .
+
+zookeeper_run1:
+	docker run -d --rm --name zk_local -p 2181:2181 my-zk:latest
 
 zookeeper_run:
 	docker run -d --rm --name zk_local -p 2181:2181 my-zk:latest
