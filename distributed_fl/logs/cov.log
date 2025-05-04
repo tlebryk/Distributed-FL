@@ -1,0 +1,36 @@
+=========================================== tests coverage ============================================
+___________________________ coverage: platform linux, python 3.12.9-final-0 ___________________________
+
+Name                                Stmts   Miss  Cover
+-------------------------------------------------------
+__init__.py                             2      0   100%
+agent.py                               55      8    85%
+benchmark.py                          134     32    76%
+client.py                             336    143    57%
+eval_script.py                         43      8    81%
+inference_server.py                    44      2    95%
+logger.py                              10      0   100%
+model_aggregator.py                    86      0   100%
+model_update_pb2.py                    31     21    32%
+model_update_pb2_grpc.py               50     23    54%
+python_extractor.py                    86     18    79%
+replica_manager.py                    331    169    49%
+server.py                             300    144    52%
+tests/conftest.py                      47     18    62%
+tests/test_agent.py                    38      0   100%
+tests/test_benchmark.py                75      0   100%
+tests/test_client.py                  208      1    99%
+tests/test_eval_script.py              81      0   100%
+tests/test_inference_server.py         64      0   100%
+tests/test_model_aggregator.py        130      0   100%
+tests/test_python_extractor.py         59      0   100%
+tests/test_replication_manager.py     195      1    99%
+tests/test_server.py                  151      1    99%
+tests/test_training.py                103      2    98%
+tests/test_utils.py                    60      0   100%
+tests/test_zk_manager.py               89     17    81%
+training.py                           125     31    75%
+utils.py                               25      1    96%
+zk_manager.py                         257    146    43%
+-------------------------------------------------------
+TOTAL                                3215    786    76%

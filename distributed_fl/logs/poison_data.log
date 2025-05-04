@@ -1,0 +1,68 @@
+uv run python distributed_fl/server.py
+2025-05-04 12:29:17 - INFO - zk_manager.py:28 - Connecting to ZooKeeper at 127.0.0.1:2181
+2025-05-04 12:29:17 - INFO - zk_manager.py:38 - Connected to ZooKeeper successfully
+2025-05-04 12:29:17 - INFO - server.py:510 - Leader server started on port 50051.
+2025-05-04 12:29:17 - INFO - server.py:493 - Registered as leader with address localhost:50051
+2025-05-04 12:29:18 - INFO - server.py:293 - Client gooddata connected with version 0
+2025-05-04 12:29:18 - INFO - server.py:327 - Client gooddata subscribed to update notifications
+2025-05-04 12:29:18 - INFO - server.py:293 - Client baddata connected with version 0
+2025-05-04 12:29:18 - INFO - server.py:327 - Client baddata subscribed to update notifications
+2025-05-04 12:29:57 - INFO - zk_manager.py:107 - Weight for baddata: 0.5
+2025-05-04 12:29:57 - INFO - server.py:150 - Received adapter update from baddata (version: 0).
+2025-05-04 12:29:59 - INFO - zk_manager.py:107 - Weight for gooddata: 0.5
+2025-05-04 12:29:59 - INFO - server.py:150 - Received adapter update from gooddata (version: 0).
+2025-05-04 12:29:59 - INFO - model_aggregator.py:49 - Evaluating aggregated model state.
+2025-05-04 12:29:59 - INFO - agent.py:115 - Loading Qwen/Qwen2.5-Coder-0.5B-Instruct tokenizer...
+2025-05-04 12:29:59 - INFO - agent.py:120 - Tokenizer loaded.
+2025-05-04 12:29:59 - INFO - agent.py:86 - Loading Qwen/Qwen2.5-Coder-0.5B-Instruct model and configuring PEFT adapter...
+Sliding Window Attention is enabled but not implemented for `sdpa`; unexpected results may be encountered.
+2025-05-04 12:29:59 - INFO - agent.py:111 - Model with PEFT adapter loaded.
+Loading Qwen/Qwen2.5-Coder-0.5B-Instruct model...
+adapter_path='./distributed_fl/adapters/server/rounds/v78'
+Loading adapter from path
+Evaluating HumanEval:   0%|          | 0/2 [00:00<?, ?it/s]The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+2025-05-04 12:31:21 - INFO - zk_manager.py:107 - Weight for baddata: 0.5
+INFO:zk_manager:Weight for baddata: 0.5
+2025-05-04 12:31:21 - INFO - server.py:150 - Received adapter update from baddata (version: 0).
+INFO:__main__:Received adapter update from baddata (version: 0).
+2025-05-04 12:31:26 - INFO - zk_manager.py:107 - Weight for gooddata: 0.5
+INFO:zk_manager:Weight for gooddata: 0.5
+2025-05-04 12:31:26 - INFO - server.py:150 - Received adapter update from gooddata (version: 0).
+INFO:__main__:Received adapter update from gooddata (version: 0).
+Evaluating HumanEval:  50%|█████     | 1/2 [01:31<01:31, 91.25s/it]Evaluating HumanEval: 100%|██████████| 2/2 [01:59<00:00, 54.24s/it]Evaluating HumanEval: 100%|██████████| 2/2 [01:59<00:00, 59.79s/it]
+INFO:root:Current run accuracy: 100.00%
+2025-05-04 12:31:59 - INFO - zk_manager.py:141 - accuracy for: 100.0
+INFO:zk_manager:accuracy for: 100.0
+2025-05-04 12:31:59 - INFO - model_aggregator.py:98 - Current run meets or exceeds best run: 100.00% >= 100.00%
+INFO:model_aggregator:Current run meets or exceeds best run: 100.00% >= 100.00%
+2025-05-04 12:31:59 - INFO - zk_manager.py:127 - Set /myapp/human_eval/accuracy = 100.0
+INFO:zk_manager:Set /myapp/human_eval/accuracy = 100.0
+2025-05-04 12:31:59 - INFO - server.py:381 - Queued notification for client gooddata about new model version 5
+INFO:__main__:Queued notification for client gooddata about new model version 5
+2025-05-04 12:31:59 - INFO - server.py:381 - Queued notification for client baddata about new model version 5
+INFO:__main__:Queued notification for client baddata about new model version 5
+2025-05-04 12:31:59 - INFO - model_aggregator.py:49 - Evaluating aggregated model state.
+INFO:model_aggregator:Evaluating aggregated model state.
+2025-05-04 12:31:59 - INFO - agent.py:115 - Loading Qwen/Qwen2.5-Coder-0.5B-Instruct tokenizer...
+INFO:agent:Loading Qwen/Qwen2.5-Coder-0.5B-Instruct tokenizer...
+2025-05-04 12:32:00 - INFO - agent.py:120 - Tokenizer loaded.
+INFO:agent:Tokenizer loaded.
+2025-05-04 12:32:00 - INFO - agent.py:86 - Loading Qwen/Qwen2.5-Coder-0.5B-Instruct model and configuring PEFT adapter...
+INFO:agent:Loading Qwen/Qwen2.5-Coder-0.5B-Instruct model and configuring PEFT adapter...
+2025-05-04 12:32:00 - INFO - agent.py:111 - Model with PEFT adapter loaded.
+INFO:agent:Model with PEFT adapter loaded.
+Loading Qwen/Qwen2.5-Coder-0.5B-Instruct model...
+adapter_path='./distributed_fl/adapters/server/rounds/v79'
+Loading adapter from path
+Evaluating HumanEval:   0%|          | 0/2 [00:00<?, ?it/s]2025-05-04 12:32:05 - INFO - server.py:532 - Leader server shutting down...
+INFO:__main__:Leader server shutting down...
+INFO:kazoo.client:Closing connection to 127.0.0.1:2181
+INFO:kazoo.client:Zookeeper session closed, state: CLOSED
+2025-05-04 12:32:05 - WARNING - zk_manager.py:47 - ZooKeeper connection lost
+WARNING:zk_manager:ZooKeeper connection lost
+Evaluating HumanEval:  50%|█████     | 1/2 [00:19<00:19, 19.78s/it]2025-05-04 12:32:29 - INFO - server.py:368 - Client gooddata unsubscribed from updates
+INFO:__main__:Client gooddata unsubscribed from updates
+2025-05-04 12:32:29 - INFO - server.py:368 - Client baddata unsubscribed from updates
+INFO:__main__:Client baddata unsubscribed from updates
+terminate called without an active exception
+make: *** [Makefile:39: local_server] Error 134
