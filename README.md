@@ -1,0 +1,3 @@
+# Distributed Federated Learning System
+
+This project uses federated learning to train code generation models locally on user devices, sharing only model updates with a central server. We built a system with client-side code editors and a central server that coordinates training, aggregates updates, and distributes improved models. It consists of two main modules, a [UI](./UI) and [distributed_fl](./distributed_fl/) to coordintate model updates between clients and a central server. Extensive documentation is in the respective readmes of these modules. You can also find a more thorough explaination in our [final project write up](https://docs.google.com/document/d/1B3pYGBsJhesd7ptNKzNN6ERGF4ZYw-bR3Ke5JWv8rcE/edit?usp=sharing).
