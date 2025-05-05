@@ -1,30 +1,16 @@
-.PHONY: grpc_update build_server build_client run_server docker_run_client_a docker_run_client_b
+.PHONY: grpc_update build_server run_server server_entrypoint local_test local_server local_client local_inference zookeeper_build zookeeper_run 
 
-# cd distributed_fl
-# pwd
 grpc_update:
 	uv run python -m grpc_tools.protoc -I=distributed_fl --python_out=distributed_fl --grpc_python_out=distributed_fl distributed_fl/model_update.proto
 
 build_server:
 	docker build -f distributed_fl/Dockerfile.server -t server . --progress=plain
 
-build_client:
-	docker build -f distributed_fl/Dockerfile.client -t client .
-
 run_server:
 	docker run -p 50051:50051 \
 	-v ./distributed_fl:/app/distributed_fl \
 	-v ~/.cache/huggingface/:/root/.cache/huggingface \
 	server
-
-run_client_a:
-	docker run -p 50052:50052 client
-
-run_client_b:
-	docker run -p 50053:50053 client
-
-client_entrypoint: 
-	docker run --rm -it -p 50052:50052 client bash
 
 server_entrypoint: 
 	docker run --rm -it -p 50051:50051 \
@@ -47,11 +33,5 @@ local_inference:
 zookeeper_build:
 	docker build -t my-zk:latest -f distributed_fl/Dockerfile.zookeeper .
 
-zookeeper_run1:
-	docker run -d --rm --name zk_local -p 2181:2181 my-zk:latest
-
 zookeeper_run:
 	docker run -d --rm --name zk_local -p 2181:2181 my-zk:latest
-
-kazoo_reset:
-	uv run distributed_fl/reset_kazoo.py
